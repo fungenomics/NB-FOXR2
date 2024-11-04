@@ -1,0 +1,84 @@
+.
+├── ChIPseq
+│   ├── external_data
+│   │   └── Gartlgruber_NatCancer_2021
+│   └── pipeline_genpipes
+│       ├── bigwigs
+│       └── peaks
+├── data_tree.txt
+├── metadata
+│   ├── 20240404-Omegatable-singlecell.xlsx
+│   └── 2024-05-27-NB-FOXR2_metadata.xlsx
+├── RNAseq
+│   ├── external_data
+│   │   ├── Gartlgruber_NatCancer_2021
+│   │   └── TARGET_ECNB
+│   └── pipeline_l3
+│       ├── 2023-04-background_samples
+│       ├── 2023-04-FOXR2_hNSCs
+│       ├── 2023-05-test_pbt
+│       └── 2024-04-human_comparator_tumor_signatures_rem_low_purity_DIPG
+└── singlecell
+    ├── integrations
+    │   ├── mouse_naive_join
+    │   └── NB-FOXR2_naive_join
+    ├── mm_inferCNV
+    │   ├── AN22476
+    │   ├── AN24377
+    │   ├── M7238
+    │   └── normVSnorm_InferCNV
+    ├── pipeline_ATAC_pseudobulk
+    │   ├── AN22476
+    │   ├── AN24377
+    │   └── M7238
+    ├── pipeline_scMultiome
+    │   └── P-6778_S-10155
+    ├── pipeline_scMultiome_mm
+    │   ├── AN22476
+    │   ├── AN24377
+    │   └── M7238
+    ├── pipeline_scMultiome_RNA_only
+    │   ├── P-6776_S-10153
+    │   └── P-6777_S-10154
+    ├── pipeline_scRNAseq
+    │   ├── NBFOXR2_6
+    │   ├── P-2236_S-2236
+    │   └── P-2273_S-2273
+    ├── references_genome
+    │   ├── biomaRt_ens_mm_to_hg_lds.Rda
+    │   ├── biomaRt_hg_symbol_to_ens_lds_old.Rda
+    │   ├── biomaRt_hg_symbol_to_ens_lds.Rda
+    │   ├── biomaRt_mm_symbol_to_ens_lds.Rda
+    │   ├── biomaRt_mm_symbol_to_refseq_lds.Rda
+    │   ├── biomaRt_mm_to_hg_lds.Rda
+    │   ├── hg19_genome_info.Rda
+    │   ├── mm10_genome_info.Rda
+    │   ├── mm10_promoter_coordinates.Rda
+    │   └── promoter_coordinates.Rda
+    ├── references_normal
+    │   ├── Aldinger_NatNeurosci_2021
+    │   ├── Chen_Cell_2020
+    │   ├── Dong_CancerCell_2020
+    │   ├── Hodge_Nature_2019__AllenBrainAtlas_human_cortex_SmartSeq
+    │   ├── Jansky_NatGenet_2021
+    │   ├── Jessa_NatGenet_2022
+    │   ├── Kildisiute_SciAdv_2021
+    │   ├── Shi_Science_2021
+    │   ├── Soldatov_Science_2019
+    │   ├── VanBruggen_DevCell_2022
+    │   ├── Yao_Cell_2021__AllenBrainAtlas_mouse_cortex_SmartSeq
+    │   ├── Yao_Nature_2023__AllenBrainAtlas_mouse_brain_10X
+    │   └── Yu_NatNeurosci_2021
+    └── CoRAL
+        ├── Config
+        ├── LICENSE
+        ├── Notebooks
+        ├── output
+        ├── Report
+        ├── Scripts
+        ├── snakefile.annotate
+        ├── snakefile.benchmark
+        ├── submit_jessaforebrain_mm_model_hydra.sh
+        ├── submit_jessaforebrain_nbfoxr2_hydra.sh
+        ├── submit_yaoforebrain_mm_model_hydra.sh
+        └── Templates
