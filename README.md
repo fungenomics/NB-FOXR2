@@ -1,4 +1,4 @@
-[![DOI](https://zenodo.org/badge/856588458.svg)](https://zenodo.org/badge/latestdoi/856588458)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.13755696.svg)](https://doi.org/10.5281/zenodo.13755696)
 
 # NB-FOXR2 analysis code
 
