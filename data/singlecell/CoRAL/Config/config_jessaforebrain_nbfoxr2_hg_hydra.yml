@@ -1,1 +1,62 @@
-/project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/revision1/data/singlecell/scCoAnnotate-dev/Config/config_jessaforebrain_nbfoxr2_hg_hydra.yml
+
+# target directory 
+output_dir: /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/data/singlecell/scCoAnnotate-dev/output/nbfoxr2_hg_Jessaforebrain
+
+# path to reference to train classifiers on (cell x gene raw counts)
+references: 
+      JessaForebrain:
+            expression: /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/data/singlecell/references_normal/Jessa_NatGenet_2022/expression_forebrain.csv
+            labels: /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/data/singlecell/references_normal/Jessa_NatGenet_2022/labels_forebrain.csv
+            convert_ref_mm_to_hg: True
+            ontology:
+                  ontology_path: /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/data/singlecell/references_normal/Jessa_NatGenet_2022/ontology.csv
+                  ontology_column: ["level3"]
+
+# path to query datasets (cell x gene raw counts)
+query_datasets:
+      P-2273_S-2273: /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/data/singlecell/pipeline_scRNAseq/P-2273_S-2273/expression.csv
+      P-2236_S-2236: /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/data/singlecell/pipeline_scRNAseq/P-2236_S-2236/expression.csv
+      P-6776_S-10153: /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/data/singlecell/pipeline_scMultiome_RNA_only/P-6776_S-10153/expression.csv
+      P-6777_S-10154: /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/data/singlecell/pipeline_scMultiome_RNA_only/P-6777_S-10154/expression.csv
+      P-6778_S-10155: /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/data/singlecell/pipeline_scMultiome/P-6778_S-10155/expression.csv
+      NBFOXR2_6: /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/data/singlecell/pipeline_scRNAseq/NBFOXR2_6/expression.csv
+
+# classifiers to run
+tools_to_run:
+      - SingleR
+      - scClassify
+      - SciBet
+      - singleCellNet
+      - SVMlinear
+      - Correlation
+      - ACTINN
+      - scHPL
+      - scPred
+      - scAnnotate
+      - scNym
+      
+consensus:
+      tools:
+            - SingleR
+            - SciBet
+            - singleCellNet
+            - SVMlinear
+            - Correlation
+            - scPred
+            - scAnnotate
+            - scNym
+      type:
+            majority:
+                  min_agree: [1,2]
+            CAWPE:
+                  mode: ["CAWPE_T", "CAWPE_CT"]
+                  alpha: [4]
+            
+
+output_dir_benchmark: /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/data/singlecell/scCoAnnotate-dev/benchmark
+
+      
+# Benchmark parameters 
+benchmark:
+  n_folds: 5
+

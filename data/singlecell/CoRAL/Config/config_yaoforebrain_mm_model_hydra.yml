@@ -1,1 +1,70 @@
-/project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/revision1/data/singlecell/scCoAnnotate-dev/Config/config_yaoforebrain_mm_model_hydra.yml
+
+# target directory 
+output_dir: /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/data/singlecell/scCoAnnotate-dev/output/mm_model_Yaoforebrain
+
+# path to reference to train classifiers on (cell x gene raw counts)
+references: 
+      YaoForebrain_class:
+            expression: /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/data/singlecell/references_normal/Yao_Nature_2023__AllenBrainAtlas_mouse_brain_10X/expression.csv
+            labels: /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/data/singlecell/references_normal/Yao_Nature_2023__AllenBrainAtlas_mouse_brain_10X/labels_class.csv
+            min_cells_per_cluster: 100
+            downsample:
+                  value: 2500 #20 clusters * 2500 = 50k maximum ref size
+                  stratified: True
+      YaoForebrain_subclass:
+            expression: /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/data/singlecell/references_normal/Yao_Nature_2023__AllenBrainAtlas_mouse_brain_10X/expression.csv
+            labels: /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/data/singlecell/references_normal/Yao_Nature_2023__AllenBrainAtlas_mouse_brain_10X/labels_subclass.csv
+            min_cells_per_cluster: 100
+            downsample:
+                  value: 500 #116 clusters * 500 = 58k maximum ref size
+                  stratified: True
+            ontology:
+                  ontology_path: /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/data/singlecell/references_normal/Yao_Nature_2023__AllenBrainAtlas_mouse_brain_10X/ontology.csv
+                  ontology_column: ["class_label"]
+
+# path to query datasets (cell x gene raw counts)
+query_datasets:
+      Foxr2_p53_r1: /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/data/singlecell/pipeline_scMultiome_mm/AN24377/expression.csv
+      Foxr2_r1: /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/data/singlecell/pipeline_scMultiome_mm/M7238/expression.csv
+      Foxr2_r2: /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/data/singlecell/pipeline_scMultiome_mm/AN22476/expression.csv
+
+# convert gene symbols in reference from mouse to human
+convert_ref_mm_to_hg: False
+
+# classifiers to run
+tools_to_run:
+      - SingleR
+      - scClassify
+      - SciBet
+      - singleCellNet
+      - SVMlinear
+      - Correlation
+      - ACTINN
+      - scHPL
+      - scPred
+      - scAnnotate
+      - scNym
+      
+consensus:
+      tools:
+            - SingleR
+            - SciBet
+            - singleCellNet
+            - SVMlinear
+            - Correlation
+            - scPred
+            - scAnnotate
+            - scNym
+      type:
+            majority:
+                  min_agree: [1,2]
+            CAWPE:
+                  mode: ["CAWPE_T", "CAWPE_CT"]
+                  alpha: [4]
+
+output_dir_benchmark: /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/data/singlecell/scCoAnnotate-dev/benchmark
+      
+# Benchmark parameters 
+benchmark:
+  n_folds: 5
+

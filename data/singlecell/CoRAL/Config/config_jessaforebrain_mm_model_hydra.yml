@@ -1,1 +1,60 @@
-/project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/revision1/data/singlecell/scCoAnnotate-dev/Config/config_jessaforebrain_mm_model_hydra.yml
+
+# target directory 
+output_dir: /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/data/singlecell/scCoAnnotate-dev/output/mm_model_Jessaforebrain
+
+# path to reference to train classifiers on (cell x gene raw counts)
+references: 
+      JessaForebrain:
+            expression: /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/data/singlecell/references_normal/Jessa_NatGenet_2022/expression_forebrain.csv
+            labels: /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/data/singlecell/references_normal/Jessa_NatGenet_2022/labels_forebrain.csv
+            ontology:
+                  ontology_path: /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/data/singlecell/references_normal/Jessa_NatGenet_2022/ontology.csv
+                  ontology_column: ["level3"]
+
+# path to query datasets (cell x gene raw counts)
+query_datasets:
+      Foxr2_p53_r1: /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/data/singlecell/pipeline_scMultiome_mm/AN24377/expression.csv
+      Foxr2_r1: /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/data/singlecell/pipeline_scMultiome_mm/M7238/expression.csv
+      Foxr2_r2: /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/data/singlecell/pipeline_scMultiome_mm/AN22476/expression.csv
+
+# convert gene symbols in reference from mouse to human
+convert_ref_mm_to_hg: False
+
+# classifiers to run
+tools_to_run:
+      - SingleR
+      - scClassify
+      - SciBet
+      - singleCellNet
+      - SVMlinear
+      - Correlation
+      - ACTINN
+      - scHPL
+      - scPred
+      - scAnnotate
+      - scNym
+      
+consensus:
+      tools:
+            - SingleR
+            - SciBet
+            - singleCellNet
+            - SVMlinear
+            - Correlation
+            - scPred
+            - scAnnotate
+            - scNym
+      type:
+            majority:
+                  min_agree: [1,2]
+            CAWPE:
+                  mode: ["CAWPE_T", "CAWPE_CT"]
+                  alpha: [4]
+            
+
+output_dir_benchmark: /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/data/singlecell/scCoAnnotate-dev/benchmark
+      
+# Benchmark parameters 
+benchmark:
+  n_folds: 5
+
