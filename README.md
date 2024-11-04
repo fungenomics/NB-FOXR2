@@ -1,6 +1,6 @@
 # NB-FOXR2 analysis code
 
-- This is the **public** repository accompanying the study: FOXR2 targets LHX6+/DLX+ neural lineages to drive CNS neuroblastoma, Jessa*, De Cola*, Chandarana*, ..., Pathania, Jabado, Kleinman, _Cancer Research_, 2024
+- This is the **public** repository accompanying the study: FOXR2 targets LHX6+/DLX+ neural lineages to drive CNS neuroblastoma, Jessa*, De Cola*, Chandarana*, ..., Pathania, Jabado, Kleinman, _Cancer Research_, 2024 ([link](https://aacrjournals.org/cancerres/article/doi/10.1158/0008-5472.CAN-24-2248/749689/FOXR2-targets-LHX6-DLX-neural-lineages-to-drive))
 - Link to repository: https://github.com/fungenomics/NB-FOXR2
 - This repository is archived on [Zenodo](https://www.doi.org/10.5281/zenodo.13755695)
 - This repository contains primarily code, see the **Data availability** section for links to data
