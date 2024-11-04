@@ -1,0 +1,1885 @@
+---
+title: "05 - TF fingerprints for progenitor domains"
+author: "Selin Jessa [[selin.jessa@mail.mcgill.ca](mailto:selin.jessa@mail.mcgill.ca)] and Bhavyaa Chandarana [[bhavyaa.chandarana@mail.mcgill.ca](mailto:bhavyaa.chandarana@mail.mcgill.ca)]"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    self_contained: yes
+    keep_md: yes
+    code_folding: show
+    theme: flatly
+    css: ../include/style.css
+    toc: yes
+    toc_depth: 4
+    number_sections: true
+    df_print: paged
+    includes:
+      before_body: ../include/header.html
+      after_body:  ../include/footer.html
+---
+
+<!-- FRONT MATTER, insert configuration info -->
+
+```{r header, echo = FALSE, results = 'asis', warning = FALSE}
+
+# Index of the document
+# ...determines name of the subfolder of `outputs` and `figures`
+doc_id <- "05"
+
+suppressMessages(library(here))
+
+# Knit child document with header
+res <- knitr::knit_child(here("include", "header.Rmd"), envir = environment(), quiet = TRUE)
+cat(res, sep = '\n')
+
+```
+
+<!-- END OF FRONT MATTER -->
+
+
+# Overview
+
+Here, we will investigate expression of transcription factors (TFs) which combinatorially
+define anatomical progenitor domains in the developing telencephalon.
+
+To demonstrate that 1) these TFs are sufficient to identify derivatives of 
+anatomical progenitor domains and 2) that they persist into adulthood, we will
+train an SVM model to predict the progenitor domain of origin of single-cell clusters,
+using per-cluster expression and detection rate of each TF. We will perform this
+using reference datasets from the developing and adult cortex in both mouse and human.
+
+Among these TFs, we will identify _fingerprints_ of different regions, which are expressed in 
+a progenitor domain during development, and maintained in the progeny lineages
+of that domain through differentiation and adulthood.
+
+Once we have established these TF fingerprints, we will examine their expression
+in NB-FOXR2 and other brain tumors, in bulk and scRNAseq data.
+
+
+
+# Libraries
+
+```{r libs, warning = FALSE, message = FALSE, echo = TRUE, cache = FALSE}
+
+library(here)
+library(magrittr)
+library(tidyr)
+library(dplyr)
+library(readr)
+library(readxl)
+library(stringr)
+library(glue)
+library(purrr)
+library(ggplot2)
+library(cowplot)
+library(data.table)
+library(Seurat)
+library(tidymodels)
+tidymodels_prefer()
+library(grid)
+library(gridExtra)
+
+source(here("include/style.R"))
+source(here("code/functions/RNAseq.R"))
+source(here("code/functions/scRNAseq.R"))
+
+ggplot2::theme_set(theme_min())
+
+square_theme <- theme(aspect.ratio = 1)
+large_text <- theme(text = element_text(size = 15))
+
+```
+
+
+# Load metadata
+
+<div class="fold o">
+
+```{r read_meta, cache = FALSE}
+
+meta <- read_tsv(here("output/00/metadata_patients_NGS.tsv"))
+meta_bulk <- meta %>% filter(RNAseq == "Y")
+
+```
+
+
+```{r read_meta_sc, cache = FALSE}
+
+meta_sc <- read_tsv(here("output/00/metadata_patients_sc.tsv"))
+sc_samples_foxr2 <- meta_sc %>% filter(Group == "NB-FOXR2") %>% pull(ID)
+
+```
+
+</div>
+
+
+# Helper functions
+
+Functions to create bubbleplots encoding both average gene expression and detection 
+rate per cluster, given a Seurat object.
+
+```{r bubble_fn}
+
+#' Calculate mean expression and detection rate in select
+#' clusters for genes of interest
+#'
+#' @param seurat Seurat object
+#' @param genes character, vector of genes for which to calculate mean exp/det. rate
+#' @param cluster_col character, name of column in \code{seurat@meta.data} to use
+#' as the cluster labels
+#' @param clusters character, (Optional) vector of clusters to use (must be a subset of the
+#' values in the \code{cluster_col} column of \code{seurat@meta.data})
+#' @param scale logical, whether to scale expression for each gene to [0, 1],
+#' across clusters
+#' @param min_cells numeric, minimum number of cells required in a cluster for it
+#' to be included. Clusters with fewer cells will be dropped.
+#'
+#' @return dataframe with 5 columns: Cluster, Gene, Expression, Pct1, N_cells
+extract_meanexp_pct <- function(seurat, genes, cluster_col,
+                                clusters = NULL, scale = TRUE,
+                                min_cells = 20) {
+    
+    genes <- genes[genes %in% rownames(seurat)]
+    
+    Idents(seurat) <- cluster_col
+    
+    # subset to required clusters
+    if (!is.null(clusters)) seurat <- subset(seurat, idents = clusters)
+    
+    # get average expression
+    data_meanexp <- Seurat::AverageExpression(seurat, features = genes, assays = "RNA") %>% 
+        .$RNA %>% 
+        t()
+    
+    # re-scale to [0, 1]
+    # if (scale == "minmax") data_meanexp <- minmax_norm(data_meanexp)
+    if (scale) data_meanexp <- apply(data_meanexp, 2, scales::rescale)
+    
+    data_meanexp <- data_meanexp %>%
+        as.data.frame() %>% 
+        tibble::rownames_to_column(var = "Cluster") %>% 
+        gather(Gene, Expression, 2:ncol(.))
+    
+    # get detection rate
+    # from functions in code/functions/scRNAseq.R
+    data_pct1 <- calc_pct1(seurat, genes) %>%
+        data.frame() %>%
+        gather(Gene, Pct1, 2:ncol(.))
+    
+    # the calc_pct1 function converts "-" in gene names to ".", so here we undo that
+    data_pct1$Gene <- gsub("\\.", "-", data_pct1$Gene)
+    
+    # calculate number of cells per cluster
+    data_ncells <- data.frame("Cluster" = seurat@meta.data[[cluster_col]]) %>%
+        group_by(Cluster) %>%
+        summarize(N_cells = n())
+    
+    # remove small clusters
+    clusters_drop <- data_ncells %>% filter(N_cells < min_cells) %>% pull(Cluster)
+    message("@ removing ", length(clusters_drop), " clusters with < ", min_cells, " cells")
+    
+    # put all outputs together into one dataframe
+    data_all <- left_join(data_meanexp, data_pct1, by = c("Cluster", "Gene")) %>% 
+        mutate(Gene = factor(Gene, levels = rev(genes))) %>% 
+        replace_na(list(Expression = 0, Pct1 = 0)) %>% 
+        left_join(data_ncells, by = "Cluster") %>% 
+        filter(!(Cluster %in% clusters_drop))
+    
+    return(data_all)
+    
+    
+}
+
+plot_bubble <- function(data_meanexp_pct, cluster_order, 
+                        genes, max_radius = 3) {
+    
+    data_plot <- data_meanexp_pct %>%
+        filter(Pct1 > 0) %>%
+        mutate(Gene = factor(Gene, levels = rev(genes))) %>%
+        mutate(Cluster = factor(Cluster, levels = cluster_order)) %>% 
+        filter(!is.na(Cluster))
+    
+    data_plot %>%
+        ggplot(aes(x = Cluster, y = Gene)) +
+        geom_point(aes(size = Pct1, colour = Expression), alpha = 0.8) +
+        scale_radius(range = c(0, max_radius), limits = c(0, 1)) +
+        scale_color_gradientn(colours = ylrd) +
+        theme_min2() +
+        rotate_x() +
+        theme(panel.grid.major.x = element_line(colour = "grey90"),
+              panel.border = element_blank(),
+              axis.ticks.x = element_blank(),
+              axis.ticks.y = element_blank(),
+              axis.text.y = element_text(size = 13))
+    
+}
+
+```
+
+# Defining TFs of interest
+
+Define TFs from literature.
+
+```{r tfs}
+
+# define mouse and human TFs
+tfs <- tribble(~Gene_hg, ~Gene_mm,
+               "FOXR2",  "Foxr2",
+               "FOXG1",  "Foxg1",
+               "PAX6",   "Pax6",
+               "EMX1",   "Emx1",
+               "EMX2",   "Emx2",
+               "TBR1",   "Tbr1",
+               "EOMES",  "Eomes",
+               "GSX2",   "Gsx2",
+               "NKX2-1", "Nkx2-1",
+               "LHX6",   "Lhx6",
+               "DLX1",   "Dlx1",
+               "DLX2",   "Dlx2",
+               "DLX5",   "Dlx5",
+               "DLX6",   "Dlx6")
+
+```
+
+
+
+# TF fingerprints in normal development
+
+## Methods
+
+In this section, we load each reference dataset (mouse adult, mouse development,
+human adult, and human fetal). For each dataset, cells are clustered and the loaded
+objects contain the cluster labels.
+
+Using the function `extract_meanexp_pct()` above in this document, we will:
+
+1. Remove any clusters with less than 20 cells.
+2. Calculate the mean expression (i.e., mean of log-transformed expression values in the
+`seurat@assay$RNA@data` slot) For each gene, the mean expression is then scaled to [0, 1]
+across clusters. The detection rate is already in the range of [0, 1]. The scaling is done
+_within_ each dataset, since different datasets may not have directly comparable expression.
+3. Calculate the detection rate (aka, "pct1") for each gene in each cluster, representing the proportion of cells in each cluster where each gene is detected. 
+4. In the `data wrangling` section, we assign cells into five main classes: 
+"CGE/LGE-derived", "MGE-derived", "Excitatory", "Progenitors", "Non-neuroectodermal", "Glia".
+5. Clusters in the three classes "CGE/LGE-derived", "MGE-derived", and "Excitatory" are
+retained for downstream analysis.
+
+Acknowledging a few implications for the methods:
+
+- small clusters (< 20 cells) are entirely excluded from the analysis; this is mainly to
+avoid unstable statistics based on only a handful of cells. Thus, small clusters are
+_not_ included in any calculation or visualization.
+- normalization of expression is done _within_ each dataset, and _prior_ to filtering out cells in other lineages
+
+
+
+## Load datasets
+
+### Human fetal forebrain A (Yu et al, 2021)
+
+```{r load_yu, cache = FALSE}
+
+load(here("data/singlecell/references_normal/Yu_NatNeurosci_2021/processed_data/seurat_joint.Rda"))
+seurat_human_dev_A <- seurat_yu_subpallium
+rm(seurat_yu_subpallium)
+
+```
+
+```{r human_dev_A}
+
+df_human_dev_A <- extract_meanexp_pct(
+    seurat_human_dev_A,
+    tfs$Gene_hg,
+    cluster_col = "celltype",
+    scale = TRUE)
+
+```
+
+### Human fetal brain B (Shi et al, 2021)
+
+```{r load_shi, cache = FALSE}
+
+load(here("data/singlecell/references_normal/Shi_Science_2021/seurat_shi.Rda"))
+seurat_human_dev_B <- seurat_shi
+rm(seurat_shi)
+
+unique(seurat_human_dev_B$Cluster)
+
+```
+
+```{r human_dev_B}
+
+df_human_dev_B <- extract_meanexp_pct(
+    seurat_human_dev_B,
+    tfs$Gene_hg,
+    cluster_col = "Cluster",
+    scale = TRUE)
+
+```
+
+### Mouse embryonal brain (Jessa et al, 2019 & 2022)
+
+```{r braindex}
+
+# mean expression and pct1 are already pre-computed
+atlas_path      <- "/project/kleinman/selin.jessa/from_hydra/atlas/data/"
+pct1_feather    <- file.path(atlas_path, "joint_mouse_extended/pct_per_cluster.feather")
+meanexp_feather <- file.path(atlas_path,
+                             "joint_mouse_extended/mean_expression_per_cluster.feather")
+cluster_col     <- "ID_20210710"
+metadata_mouse  <- data.table::fread(
+    here("data/singlecell/references_normal/Jessa_NatGenet_2022/metadata_20210710_corrected.tsv"),
+    data.table = FALSE)
+
+clusters_keep   <- metadata_mouse %>%
+    filter(Location == "Forebrain") %>%
+    filter(!grepl("EXCLUDE", Label) & Level1_type != "Unresolved" & !grepl("^Y", Exclude)) %>% 
+    filter(N_cells >= 20) %>% 
+    pull(Label)
+
+x_mean <- feather::read_feather(meanexp_feather, c("ID_20210710", tfs$Gene_mm)) %>%
+    rename(Cluster = ID_20210710) %>% 
+    tibble::column_to_rownames(var = "Cluster") %>% 
+    apply(2, scales::rescale) %>%
+    data.frame() %>%
+    tibble::rownames_to_column(var = "Cluster") %>%
+    gather(Gene, Expression, 2:ncol(.)) %>% 
+    # correct an issue in the Nkx2-1 name
+    mutate(Gene = ifelse(Gene == "Nkx2.1", "Nkx2-1", Gene))
+
+x_pct1 <- feather::read_feather(pct1_feather, c("ID_20210710", tfs$Gene_mm)) %>% 
+    rename(Cluster = ID_20210710) %>% 
+    gather(Gene, Pct1, 2:ncol(.))
+
+df_mouse_dev <- left_join(x_mean, x_pct1, by = c("Cluster", "Gene")) %>%
+    filter(Cluster %in% clusters_keep) %>%
+    mutate(Gene = factor(Gene, levels = rev(tfs$Gene_mm))) %>% 
+    replace_na(list(Expression = 0, Pct1 = 0)) %>% 
+    left_join(metadata_mouse %>% select(Label, N_cells),
+              by = c("Cluster" = "Label"))
+
+```
+
+### Human adult cortex (Hodge et al, 2019 - Allen human)
+
+```{r load_hodge, cache = FALSE}
+
+load(here("data/singlecell/references_normal/Hodge_Nature_2019__AllenBrainAtlas_human_cortex_SmartSeq/seurat_hodge.Rda"))
+seurat_human_adult <- seurat_hodge_cortex
+rm(seurat_hodge_cortex)
+
+meta_human_adult <- seurat_human_adult@meta.data
+saveRDS(meta_human_adult, file = glue("{out}/cell_metadata_human_adult.Rds"))
+
+```
+
+```{r human_adult}
+
+unique(seurat_human_adult$class_label)
+
+seurat_human_adult_clusters_keep <- seurat_human_adult@meta.data %>% 
+    distinct(cluster_label, class_label, subclass_label) %>% 
+    filter(class_label != "Exclude") %>% 
+    pull(cluster_label)
+
+df_human_adult <- extract_meanexp_pct(
+    seurat_human_adult,
+    tfs$Gene_hg,
+    cluster_col = "cluster_label",
+    clusters = seurat_human_adult_clusters_keep,
+    scale = TRUE)
+
+```
+
+### Mouse adult cortex (Yao et al, 2021 - Allen mouse)
+
+```{r load_yao2, cache = FALSE}
+
+load(here("data/singlecell/references_normal/Yao_Cell_2021__AllenBrainAtlas_mouse_cortex_SmartSeq/seurat_yao.Rda"))
+seurat_mouse_adult <- seurat_yao_cortex
+rm(seurat_yao_cortex)
+
+meta_mouse_adult <- seurat_mouse_adult@meta.data
+saveRDS(meta_mouse_adult, file = glue("{out}/cell_metadata_mouse_adult.Rds"))
+
+```
+
+
+```{r mouse_adult}
+
+unique(seurat_mouse_adult$class_label)
+
+df_mouse_adult <- extract_meanexp_pct(
+    seurat_mouse_adult,
+    tfs$Gene_mm,
+    cluster_col = "cluster_label",
+    scale = TRUE)
+
+```
+
+
+## Data wrangling
+
+Reformat each dataset, adding a harmonized "Class" label.
+For datasets where a subclass label is available, we'll also display
+that below, to be able to annotate plots.
+
+_**NOTE**_: For some datasets (the adult human & mouse datasets from the Allen Brain Atlas), 
+the subclass is defined based on the dendrogram, and imperfect (e.g. with a few populations
+from one subtype, clustered in the subtree of another subtype).
+
+```{r data_wrangling}
+
+# ------------------------------------------------------------------------------
+df_human_dev_A_class <- df_human_dev_A %>% 
+    mutate(Class = case_when(
+        Cluster %in% c("CGE1", "LGE1", "LGE2", "LGE3") ~ "CGE/LGE-derived lineage",
+        Cluster %in% c("MGE1", "MGE2") ~ "MGE-derived lineage",
+        Cluster %in% c("P1", "P2", "P3", "P4", "P5", "P6") ~ "Progenitors",
+        Cluster %in% c("ExN1", "ExN2", "ExN3", "ExN4", "ExN5") ~ "Excitatory lineage",
+        Cluster %in% c("EC1", "EC2", "MG") ~ "Non-neuroectodermal",
+        Cluster == "OPC" ~ "Glia"))
+
+# ------------------------------------------------------------------------------
+df_human_dev_B_class <- df_human_dev_B %>% 
+    mutate(Class = case_when(
+        grepl("CGE|LGE", Cluster)  ~ "CGE/LGE-derived lineage",
+        grepl("MGE", Cluster) ~ "MGE-derived lineage",
+        grepl("progenitor", Cluster) ~ "Progenitors",
+        grepl("Excitatory", Cluster) ~ "Excitatory lineage",
+        grepl("Thalamic neurons", Cluster) ~ "Other neurons",
+        grepl("OPC", Cluster) ~ "Glia",
+        Cluster %in% c("Endothelial", "Microglia") ~ "Non-neuroectodermal"
+    ))
+
+# ------------------------------------------------------------------------------
+df_mouse_dev_class <- df_mouse_dev %>% 
+    left_join(metadata_mouse %>% select(Cluster = Label, Level3_type, Level1_type), by = "Cluster") %>% 
+    mutate(Class = case_when(
+        Level3_type == "MGE inhibitory neurons" ~ "MGE-derived lineage",
+        Level3_type %in% c("Cortical inhibitory neurons", "Striatal spiny neurons") ~ "CGE/LGE-derived lineage",
+        Level3_type == "Cortical excitatory neurons" ~ "Excitatory lineage",
+        grepl("RGC|IPC|progenitor", Level3_type) | Level1_type == "Progenitors" ~ "Progenitors",
+        grepl("[Nn]eurons", Level3_type) ~ "Other neurons",
+        Level1_type %in% c("Leptomeningeal", "Blood", "Endothelial", "Vascular", "Immune") ~ "Non-neuroectodermal",
+        Level1_type == "Glia" ~ "Glia")) %>% 
+    # replace with human gene names for compatibility
+    left_join(tfs, by = c("Gene" = "Gene_mm")) %>% 
+    select(-Level3_type, -Level1_type, -Gene) %>% 
+    rename(Gene = Gene_hg)
+
+# ------------------------------------------------------------------------------
+# check the subclass labels
+seurat_human_adult@meta.data %>% 
+    distinct(cluster_label, subclass_label, class_label) %>% 
+    filter(class_label != "Exclude") %>% 
+    arrange(class_label, subclass_label, cluster_label) %>% 
+    DT::datatable()
+
+df_human_adult_class <- df_human_adult %>% 
+    left_join(seurat_human_adult@meta.data %>% distinct(cluster_label, subclass_label, class_label), by = c("Cluster" = "cluster_label")) %>% 
+    mutate(Class = case_when(
+        class_label == "Glutamatergic" ~ "Excitatory lineage",
+        subclass_label %in% c("PVALB", "SST") ~ "MGE-derived lineage",
+        subclass_label %in% c("VIP", "LAMP5", "PAX6") ~ "CGE/LGE-derived lineage",
+        subclass_label %in% c("Microglia", "Pericyte", "Endothelial", "VLMC") ~ "Non-neuroectodermal",
+        subclass_label %in% c("Astrocyte", "OPC", "Oligodendrocyte") ~ "Glia")) %>% 
+    dplyr::rename(Subclass = subclass_label) %>% 
+    select(-class_label)
+
+# ------------------------------------------------------------------------------
+# check the subclass labels
+seurat_mouse_adult@meta.data %>% 
+    distinct(cluster_label, subclass_label, class_label) %>% 
+    arrange(class_label, subclass_label, cluster_label) %>% 
+    DT::datatable()
+
+df_mouse_adult_class <- df_mouse_adult %>% 
+    left_join(seurat_mouse_adult@meta.data %>% distinct(cluster_label, subclass_label, class_label), by = c("Cluster" = "cluster_label")) %>% 
+    mutate(Class = case_when(
+        class_label == "Glutamatergic" ~ "Excitatory lineage",
+        subclass_label %in% c("Pvalb", "Sst", "Sst Chodl") ~ "MGE-derived lineage",
+        subclass_label %in% c("Vip", "Lamp5", "Sncg") ~ "CGE/LGE-derived lineage",
+        subclass_label %in% c("Meis2") ~ "Other neurons",
+        subclass_label %in% c("Endo", "Micro-PVM", "VLMC", "SMC-Peri") ~ "Non-neuroectodermal",
+        subclass_label %in% c("Oligo", "Astro") ~ "Glia")) %>% 
+    # replace with human gene names for compatibility
+    left_join(tfs, by = c("Gene" = "Gene_mm")) %>% 
+    select(-Gene) %>% 
+    rename(Gene = Gene_hg) %>% 
+    dplyr::rename(Subclass = subclass_label) %>% 
+    select(-class_label)
+
+```
+
+Save intermediates:
+
+```{r}
+
+save(df_human_dev_A_class, df_human_dev_B_class, df_mouse_dev_class, df_human_adult_class, df_mouse_adult_class,
+     file = glue("{out}/training_inputs_perdataset.Rda"))
+
+```
+
+Combine datasets:
+
+```{r combine_data}
+
+# put all datasets together
+df_train_all_prefilt <- bind_rows(df_human_dev_A_class %>% mutate(Dataset = "Human dev A"),
+                                  df_human_dev_B_class %>% mutate(Dataset = "Human dev B"),
+                                  df_mouse_dev_class   %>% mutate(Dataset = "Mouse dev"),
+                                  df_human_adult_class %>% mutate(Dataset = "Human adult"),
+                                  df_mouse_adult_class %>% mutate(Dataset = "Mouse adult"))
+
+# save a map from cluster ---> class label to be reused later
+cluster_class_map <- df_train_all_prefilt %>% distinct(Cluster, Class, Dataset) %>%
+    mutate(Class = as.character(Class)) %T>%
+    rr_write_tsv(glue("{out}/cluster_class_map.tsv"), "Map from normal brain clusters to broad classes used in analysis") %>%
+    select(Cluster, Class) %>%
+    tibble::deframe()
+
+df_train_all <- df_train_all_prefilt %>%
+    filter(Class %in% c("MGE-derived lineage", "CGE/LGE-derived lineage", "Excitatory lineage")) %>% 
+    mutate(Class = factor(Class, levels = c("Excitatory lineage",
+                                            "CGE/LGE-derived lineage",
+                                            "MGE-derived lineage"))) %>% 
+    relocate(Class, .after = "Cluster")
+
+# convert to wide format, so that each sample (datapoint) is in one row, and each
+# feature/variable is in a separate column
+df_train_wide <- df_train_all %>%
+    # remove the column containing # of cells per cluster, and remove the subclass label
+    select(-N_cells, -Subclass) %>% 
+    # exclude Foxr2 for the SVM portion of the analysis
+    filter(Gene != "FOXR2") %>%
+    # create two features per gene, Expression and detection rate (Pct1)
+    pivot_wider(names_from = "Gene", values_from = c("Expression", "Pct1")) %>% 
+    mutate(Dataset = case_when(
+        Dataset %in% c("Human dev A", "Human dev B") ~ "Human dev",
+        TRUE ~ Dataset
+    ))
+
+# sanity check - confirm there's no NAs in the Class labels
+nrow(df_train_wide[is.na(df_train_wide$Class), ]) == 0
+
+# sanity check - confirm cluster/class correspondences make sense
+df_train_all %>% distinct(Dataset, Cluster, Class, N_cells) %>% arrange(Class)
+
+save(df_train_all, df_train_wide, cluster_class_map,
+     file = glue("{out}/training_data.Rda"))
+
+```
+
+### TABLE: TF quantification per cluster
+
+Export a supplementary table for the expression and detection rate of TF fingerprint
+per cluster in each dataset:
+
+```{r}
+
+TABLE_df_train <- df_train_all %>% 
+    filter(Gene != "FOXR2") %>%
+    # replace dataset nicknames with refs
+    mutate(Dataset = dplyr::recode(Dataset,
+                                   "Human dev A" = "Yu et al 2021",
+                                   "Human dev B" = "Shi et al 2021",
+                                   "Mouse dev"   = "Jessa et al 2019, 2022",
+                                   "Human adult" = "Hodge et al 2019",
+                                   "Mouse adult" = "Yao et al 2021")) %>% 
+    select(-Subclass)
+
+rr_write_tsv(TABLE_df_train, 
+             glue("{out}/TABLE_TF_fingerprints.tsv"),
+             "Expression and detection of TF fingerprint genes in datasets, per cluster")
+
+```
+
+## Evaluate class balance
+
+Here, let's check the composition of each class in terms of species/age, 
+and let's check the overall balance of the training dataset in terms of class.
+
+```{r class_balance}
+
+# check the class composition
+dim(df_train_wide)
+p1 <- df_train_wide %>% 
+    group_by(Dataset, Class) %>% 
+    count() %>% 
+    ggplot(aes(x = Class, y = n)) +
+    geom_col(aes(fill = Dataset), position = position_dodge()) +
+    rotate_x()
+
+p2 <- df_train_wide %>% 
+    group_by(Dataset, Class) %>% 
+    count() %>% 
+    ggplot(aes(x = Dataset, y = n)) +
+    geom_col(aes(fill = Class), position = position_dodge()) +
+    rotate_x()
+
+plot_grid(p1, p2, nrow = 1, align = "h", axis = "tblr")
+
+```
+
+## Transcription factor-based classifier
+
+Here, we train a linear SVM on the combined input matrix of TF mean expression and detection
+rate. In the multi-class scenario, a linear SVM is basically evaluating several one-vs-all
+binary classifiers, one per class, i.e. which classifies the samples (in this case, clusters) as belonging
+to that class, or not.
+
+### Train models with $k$-fold CV
+
+```{r cv}
+
+# set up a linear SVM for classification using tidymodels/parsnip
+# https://parsnip.tidymodels.org/articles/Examples.html#svm_linear-models
+svm_spec <- svm_linear() %>% set_mode("classification") %>% set_engine("LiblineaR")
+svm_spec
+
+df_train_wide_features <- df_train_wide %>% select(-Cluster, -Dataset)
+
+# set up 4-fold validation,
+# stratified so that classes are balanced across folds
+# https://www.tidymodels.org/start/resampling/#fit-resamples
+table(df_train_wide$Class)
+folds <- vfold_cv(df_train_wide, v = 4, strata = "Class")
+folds
+
+# loop over folds, holding out one each time for evaluation
+fit_vfold <- imap_dfr(folds$splits, function(fold, i) {
+    
+    # get idx of held-out samples
+    out_id <- setdiff(1:nrow(df_train_wide), fold$in_id)
+    
+    # fit the SVM on the training idx
+    fit_fold_i <- fit(svm_spec,
+                      formula = Class ~ .,
+                      data = df_train_wide_features[fold$in_id, ])
+    
+    # predict on the held-out fold
+    bind_cols(
+        df_train_wide[out_id, ] %>% select(Cluster, Class, Dataset),
+        predict(fit_fold_i, df_train_wide_features[out_id, ], type = "class")
+    ) %>% 
+        mutate(Fold = i)
+    
+})
+
+```
+
+### Evaluate models
+
+Here, we calculate and plot per-fold accuracy & precision evaluation metrics for the SVM.
+
+```{r eval_models}
+
+multi_metric <- yardstick::metric_set(precision, recall)
+
+# calculate metrics per fold, per class
+fit_metrics <- fit_vfold %>%
+    group_by(Fold, Class) %>%
+    multi_metric(truth = Class, estimate = .pred_class)
+
+# calculate metrics per fold, per dataset
+fit_metrics2 <- fit_vfold %>%
+    group_by(Fold, Class, Dataset) %>%
+    multi_metric(truth = Class, estimate = .pred_class)
+
+save(fit_metrics, fit_metrics2, file = glue("{out}/fit_metrics.Rda"))
+
+```
+
+In the below plots, the horizontal bar denotes median value across folds.
+
+```{r SVM-dot-plot-median, fig.width = 7, fig.height = 7}
+
+palette_metrics <- c("precision" = "dodgerblue4",
+                     "recall" = "darkred")
+
+fit_metrics2 %>% 
+  filter(Dataset %in% c("Human adult",
+                        "Mouse adult")) %>% 
+  mutate(Dataset = factor(Dataset,
+                            levels = c("Human adult",
+                                        "Mouse adult"))) %>% 
+  mutate(Class = factor(Class,
+                          levels = c("Excitatory lineage",
+                                     "CGE/LGE-derived lineage",
+                                     "MGE-derived lineage"))) %>% 
+  mutate(.metric = factor(.metric,
+                          levels = c("precision",
+                                     "recall"))) %>% 
+  mutate(Metric_class = interaction(.metric,Class)) %>% 
+  #unite("Class_Metric", c(Class, .metric),remove = F) %>% 
+  ggplot(aes(x = Metric_class, y = .estimate), plot_num = 1) +
+    geom_dotplot(binaxis = "y", stackdir = "center", 
+                 aes(fill = .metric), dotsize = 1.2, alpha = 0.8, stroke = 0) +
+    facet_grid(~ Dataset) +
+    stat_summary(fun.y = median, fun.ymin = median, fun.ymax = median, geom = "crossbar", width = 0.5) +
+    scale_color_manual(values = palette_metrics) +
+    ggtitle("") +
+    scale_y_continuous(breaks=c(0, 0.5, 1), 
+                       limits=c(0, 1)) +
+    geom_vline(xintercept = c(2.5, 4.5), linetype="dashed", color="grey80")+
+    rotate_x()
+
+```
+
+
+## TF fingerprints
+
+To display the TF "fingerprints", we'll first use the previously computed mean expression/detection
+rate per cluster and display these values as bubbleplots. Secondly, we'll re-compute
+mean expression/detection rate for each gene, but using the _classes_ within each dataset
+instead of individual _clusters_, for simpler visualization.
+
+We'll also generate versions with the minimal set of TFs that are sufficient for
+classification and persist into adulthood.
+
+```{r}
+
+# define mouse and human TFs
+tfs_min <- tribble(~Gene_hg, ~Gene_mm,
+                   "FOXG1",  "Foxg1",
+                   "EMX1",   "Emx1",
+                   "TBR1",   "Tbr1",
+                   "LHX6",   "Lhx6",
+                   "DLX1",   "Dlx1",
+                   "DLX2",   "Dlx2",
+                   "DLX5",   "Dlx5",
+                   "DLX6",   "Dlx6")
+
+```
+
+### Per cluster, by lineage
+
+Let's separate out each class, and then plot clusters in order of species/age. (Used in supplementary figures.)
+
+MGE clusters:
+
+```{r fingerprint_mge_bubble, fig.width = 9.3, fig.height = 4, echo_fig = TRUE}
+
+bubble_genes <- tfs_min$Gene_hg
+
+# Remove extra TFs not in minimal set from dataframe used for plotting
+# Otherwise an extra unnecessary row called "NA" is present.
+df_train_all_fig <- df_train_all %>% 
+  filter(Gene %in% bubble_genes)
+
+mge_clusters <- df_train_all %>%
+    filter(Class == "MGE-derived lineage") %>%
+    mutate(Dataset = factor(Dataset, levels = c("Mouse dev", "Human dev A",
+                                                "Human dev B", "Mouse adult", "Human adult"))) %>%
+    arrange(Dataset, Subclass, Cluster) %>%
+    pull(Cluster) %>%
+    unique()
+
+df_train_all_fig %>%
+    filter(Class == "MGE-derived lineage") %>%
+    plot_bubble(genes = bubble_genes,
+                cluster_order = mge_clusters) +
+    theme(legend.position = "bottom",
+          axis.text.x = element_text(size = 6)) +
+    ggtitle("MGE-derived lineages")
+
+```
+
+CGE & LGE clusters:
+
+```{r fingerprint_cge_bubble, fig.width = 10, fig.height = 5}
+
+cge_clusters <- df_train_all %>%
+    filter(Class == "CGE/LGE-derived lineage") %>%
+    mutate(Dataset = factor(Dataset, levels = c("Mouse dev", "Human dev A",
+                                                "Human dev B", "Mouse adult", "Human adult"))) %>%
+    arrange(Dataset, Subclass, Cluster) %>%
+    pull(Cluster) %>%
+    unique()
+
+df_train_all_fig %>%
+    filter(Class == "CGE/LGE-derived lineage") %>%
+    plot_bubble(genes = bubble_genes,
+                cluster_order = cge_clusters) +
+    theme(legend.position = "bottom",
+          axis.text.x = element_text(size = 6)) +
+    ggtitle("CGE/LGE-derived lineages")
+
+```
+
+Excitatory neuron clusters:
+
+```{r fingerprint_exn_bubble, fig.width = 14, fig.height = 5}
+
+
+exn_clusters <- df_train_all %>%
+    filter(Class == "Excitatory lineage") %>%
+    mutate(Dataset = factor(Dataset, levels = c("Mouse dev", "Human dev A",
+                                                "Human dev B", "Mouse adult", "Human adult"))) %>%
+    arrange(Dataset, Subclass, Cluster) %>%
+    pull(Cluster) %>%
+    unique()
+
+df_train_all_fig %>%
+    filter(Class == "Excitatory lineage") %>%
+    plot_bubble(genes = bubble_genes,
+                cluster_order = exn_clusters) +
+    theme(legend.position = "bottom",
+          axis.text.x = element_text(size = 6)) +
+    ggtitle("Excitatory lineages")
+
+```
+
+### Per aggregated class
+
+Here, we calculate mean expression/detection rate per _class_ instead of per
+_cluster_. (Used in main figures.)
+
+```{r aggregate_stats_per_class}
+
+# ------------------------------------------------------------------------------
+# helper function to make sure each Seurat object has a cluster label
+set_class_labels <- function(seurat, cluster_col) {
+    
+    seurat@meta.data$Class <- plyr::mapvalues(
+        as.character(seurat@meta.data[[cluster_col]]),
+        from = names(cluster_class_map),
+        to = unname(cluster_class_map),
+        warn_missing = FALSE)
+    
+    return(seurat)
+    
+}
+
+# ------------------------------------------------------------------------------
+# do the aggregation for the seurat objects
+seurat_human_dev_A <- set_class_labels(seurat_human_dev_A, "celltype")
+df_human_dev_A_agg <- extract_meanexp_pct(
+    seurat_human_dev_A,
+    tfs$Gene_hg,
+    cluster_col = "Class",
+    scale = TRUE)
+
+seurat_human_dev_B <- set_class_labels(seurat_human_dev_B, "Cluster")
+df_human_dev_B_agg <- extract_meanexp_pct(
+    seurat_human_dev_B,
+    tfs$Gene_hg,
+    cluster_col = "Class",
+    scale = TRUE)
+
+seurat_mouse_adult <- set_class_labels(seurat_mouse_adult, "cluster_label")
+df_mouse_adult_agg <- extract_meanexp_pct(
+    seurat_mouse_adult,
+    tfs$Gene_mm,
+    cluster_col = "Class",
+    scale = TRUE) %>% 
+    left_join(tfs, by = c("Gene" = "Gene_mm")) %>% 
+    select(-Gene) %>% 
+    rename(Gene = Gene_hg)
+
+seurat_human_adult <- set_class_labels(seurat_human_adult, "cluster_label")
+df_human_adult_agg <- extract_meanexp_pct(
+    seurat_human_adult,
+    tfs$Gene_hg,
+    cluster_col = "Class",
+    scale = TRUE)
+
+```
+
+The mouse dev brain dataset is not in the form of a Seurat object, so let's 
+calculate meanexp/pct1 separately:
+
+```{r}
+
+# do the aggregation for the mouse dev reference, where we have an indexed
+# feather file containing cluster labels and per-cell gene expression values
+expr_mouse_dev <- feather::read_feather(
+    file.path(atlas_path, "joint_cortex_extended/joint_cortex_extended.embedding_and_genes.feather"),
+    columns = c("ID_20210710", tfs$Gene_mm))
+
+expr_mouse_dev_agg <- expr_mouse_dev %>% 
+    filter(ID_20210710 %in% clusters_keep) %>% 
+    left_join(tibble::enframe(cluster_class_map, "Cluster", "Class"),
+              by = c("ID_20210710" = "Cluster")) %>% 
+    select(-ID_20210710) %>% 
+    relocate(Class, .before = 1)
+
+# calculate mean expression and pct1
+meanexpr_mouse_dev_agg <- aggregate(expr_mouse_dev_agg[, 2:ncol(expr_mouse_dev_agg)],
+                                    by = list(expr_mouse_dev_agg$Class),
+                                    FUN = mean)
+names(meanexpr_mouse_dev_agg)[1] <- "Cluster"
+
+# scale to [0, 1] per gene
+meanexpr_mouse_dev_agg <- meanexpr_mouse_dev_agg %>% 
+    tibble::column_to_rownames("Cluster") %>%  
+    apply(2, scales::rescale) %>% 
+    as.data.frame() %>% 
+    tibble::rownames_to_column(var = "Cluster")
+
+pct1_mouse_dev_agg <- expr_mouse_dev_agg %>% select(-Class)
+# binarize
+pct1_mouse_dev_agg[pct1_mouse_dev_agg > 0] <- 1
+pct1_mouse_dev_agg <- as.data.table(pct1_mouse_dev_agg)
+# Add cluster info for cells
+pct1_mouse_dev_agg[, Cluster := as.character(expr_mouse_dev_agg$Class)]
+# Get prop of cells expressing a gene, within each cluster
+pct1_mouse_dev_agg <- pct1_mouse_dev_agg[, lapply(.SD, prop), by = Cluster] %>% 
+    as.data.frame()
+
+# calculate number of cells per cluster
+ncells_mouse_dev_agg <- expr_mouse_dev_agg %>% 
+    select(Cluster = Class) %>% 
+    group_by(Cluster) %>%
+    summarize(N_cells = n())
+
+df_mouse_dev_agg <- left_join(
+    meanexpr_mouse_dev_agg %>% gather("Gene", "Expression", 2:ncol(.)),
+    pct1_mouse_dev_agg %>% gather("Gene", "Pct1", 2:ncol(.)),
+    by = c("Cluster", "Gene")) %>% 
+    left_join(ncells_mouse_dev_agg) %>% 
+    left_join(tfs, by = c("Gene" = "Gene_mm")) %>% 
+    select(-Gene) %>% 
+    rename(Gene = Gene_hg) 
+
+save(df_mouse_dev_agg, df_human_dev_A_agg, df_human_dev_B_agg,
+     df_mouse_adult_agg, df_human_adult_agg,
+     file = glue("{out}/meanexp_pct_aggregated_per_class.Rda"))
+
+```
+
+Combine the aggregated data from all datasets:
+
+```{r df_aggregated}
+
+df_aggregated <- bind_rows(df_human_dev_A_agg %>% mutate(Dataset = "Human dev A"),
+                           df_human_dev_B_agg %>% mutate(Dataset = "Human dev B"),
+                           df_mouse_dev_agg   %>% mutate(Dataset = "Mouse dev"),
+                           df_human_adult_agg %>% mutate(Dataset = "Human adult"),
+                           df_mouse_adult_agg %>% mutate(Dataset = "Mouse adult")) %>%
+    filter(Cluster %in% c("MGE-derived lineage", "CGE/LGE-derived lineage", "Excitatory lineage")) %>% 
+    mutate(Cluster = factor(Cluster, levels = c("Excitatory lineage",
+                                                "CGE/LGE-derived lineage",
+                                                "MGE-derived lineage"))) %>% 
+    arrange(Cluster) %>% 
+    mutate(Cluster = paste0(as.character(Cluster), "\n", Dataset))
+
+agg_order <- df_aggregated %>%  
+    pull(Cluster) %>% 
+    unique()
+
+```
+
+Minimal set of TFs (used in main figures):
+
+```{r bubbplot_aggregated_by_class_min, fig.width = 6, fig.height = 4.5}
+
+df_aggregated %>%
+    filter(Gene %in% tfs_min$Gene_hg) %>% 
+    plot_bubble(genes = tfs_min$Gene_hg,
+                cluster_order = agg_order,
+                max_radius = 8)
+
+```
+
+### TABLE: TF quantification per lineage
+
+Export a supplementary table for the expression and detection rate of TF fingerprint
+per lineage in each dataset:
+
+```{r}
+
+TABLE_df_aggregated <- df_aggregated %>% 
+    filter(Gene != "FOXR2") %>%
+    # tidy Cluster id
+    separate(Cluster, into = c("Cluster", "drop"), sep = "\n") %>% 
+    select(-drop) %>% 
+    # replace dataset nicknames with refs
+    mutate(Dataset = dplyr::recode(Dataset,
+                                   "Human dev A" = "Yu et al 2021",
+                                   "Human dev B" = "Shi et al 2021",
+                                   "Mouse dev"   = "Jessa et al 2019, 2022",
+                                   "Human adult" = "Hodge et al 2019",
+                                   "Mouse adult" = "Yao et al 2021"))
+
+rr_write_tsv(TABLE_df_aggregated, 
+             glue("{out}/TABLE_TF_fingerprints_aggregated.tsv"),
+             "Expression and detection of TF fingerprint genes in dev datasets, aggregated by lineage")
+
+```
+
+
+
+# TF expression in tumor bulk RNAseq
+
+Here, we will inspect expression of the MGE TF fingerprint (developed in above sections) 
+as well as key transcription factors and gene markers for extracranial neuroblastoma 
+(EC-NB), in bulk RNAseq profiles of human tumors (intracranial pediatric brain tumors as well as EC-NB).
+
+```{r load-ec-nb-key-tfs}
+
+# define mouse and human TFs
+tfs <- tribble(~Gene_hg, ~Gene_mm,
+               "FOXR2",  "Foxr2",
+               "FOXG1",  "Foxg1",
+               "PAX6",   "Pax6",
+               "EMX1",   "Emx1",
+               "EMX2",   "Emx2",
+               "TBR1",   "Tbr1",
+               "EOMES",  "Eomes",
+               "GSX2",   "Gsx2",
+               "NKX2-1", "Nkx2-1",
+               "LHX6",   "Lhx6",
+               "DLX1",   "Dlx1",
+               "DLX2",   "Dlx2",
+               "DLX5",   "Dlx5",
+               "DLX6",   "Dlx6")
+
+# define EC-NB TFs and markers
+ecnb_tfs_hg <- c("PHOX2B",
+              "HAND1",
+              "HAND2",
+              "ISL1",
+              "GATA3",
+              "LMO1",
+              "ASCL1",
+              "DBH")
+
+# Convert genes from human to mouse using cached biomaRt reference
+load(here("data/singlecell/references_genome/biomaRt_mm_to_hg_lds.Rda"))
+(ecnb_tfs <- genes_lds %>% filter(HGNC.symbol %in% ecnb_tfs_hg) %>% 
+    rename(Gene_mm = MGI.symbol) %>% 
+    rename(Gene_hg = HGNC.symbol) %>% 
+    arrange(factor(Gene_hg, ecnb_tfs_hg)))
+
+# Check that all genes were converted
+length(ecnb_tfs$Gene_mm) == length(ecnb_tfs_hg)
+
+# Append ECNB genes to tfs list
+tfs_no_ecnb <- tfs
+tfs <- rbind(tfs, ecnb_tfs)
+
+```
+
+Define a function to create rows of boxplots:
+
+<details>
+
+```{r boxplot-function}
+
+# Input:
+# - y_maxes: vector of y-axis maximum values, named with the gene symbols to plot
+#   --> e.g. c("FOXR2" = 2000, "LHX6" = 4000)
+# - scale_to_maxes: T/F, whether to use the y-max values to scale or allow each plot
+#   to have a free scale
+# - counts: tidy counts matrix which includes columns: gene_symbol, gene_expression, sample, Group
+# - palette: palette for Group variable in counts matrix  
+# - label_y: OPTIONAL list of indices for box plots that require y axis value labels
+#   --> e.g. c(1,2)
+#   --> If not provided, only the first box plot will have a label (= c(1))
+# - strip_label: OPTIONAL boolean (T/F) whether to add right side strip label for "group"
+#   --> default is False (no label)
+
+tf_exp_boxplots <- function(y_maxes,
+                            scale_to_maxes = T,
+                            counts,
+                            palette,
+                            label_y = c(1),
+                            strip_label = F) {
+    
+    
+    # loop over genes & the maximum y values for each gene,
+    # making boxplots for each gene as 1 column to be combined with plot_grid
+    # .x = ymaxes (vector values), .y = genes (vector names)
+    plots <- imap(y_maxes,
+                  function(max, gene_name){
+                      
+                      p <- counts %>%
+                              # subset counts
+                              filter(gene_symbol == gene_name) %>%
+                                  ggplot(aes(x = factor(1), y = gene_expression)) +
+                                  # make boxplot with jittered points
+                                  geom_boxplot(aes(fill = Group), outlier.shape = NA, width = 0.3) +
+                                  geom_jitter(aes(fill = Group), size = 0.5, width = 0.2, shape = 21) +
+                                  scale_fill_manual(values = palette)  +
+                                  # make a one-column plot
+                                  facet_wrap(~ Group, ncol = 1, strip.position = "right") 
+                      
+                      if(scale_to_maxes){
+                          # subset the plotting area (y-axis) to the specified y-max value
+                          # and only show the min and max of the y-axis
+                          p <- p + coord_cartesian(ylim = c(0, max)) +
+                              scale_y_continuous(breaks = c(0, max))
+                      }
+                      
+                      
+                      p <- p + theme_min2() +
+                                  no_legend() + ggtitle(gene_name) + xlab(NULL) + ylab(NULL) +
+                                  # put the group label on the right instead of the top
+                                  theme(strip.text.x = element_text(angle = 0, size = 2)) +
+                                  theme(aspect.ratio = 2)
+                      
+                      return(p)
+                      
+                  })
+    
+    if(strip_label){
+        # remove the y-axis strip labels in all but the last plot
+        plots[1:(length(y_maxes) - 1)] <- map(plots[1:(length(y_maxes) - 1)], ~ .x + theme(strip.text.y = element_blank()))
+    } else {
+        # remove the y-axis strip labels in ALL plots
+        plots[1:length(y_maxes)] <- map(plots[1:length(y_maxes)], ~ .x + theme(strip.text.y = element_blank()))
+    }
+
+    # remove the y-axis value labels for all except specified plots
+    y_axis_rem <- setdiff(1:length(y_maxes), label_y)
+    plots[y_axis_rem] <- map(plots[y_axis_rem], ~ .x + theme(axis.text.y = element_blank()))
+    
+    plot_grid(plotlist = plots, nrow = 1, align = "h", axis = "tb")
+}
+
+
+```
+
+</details>
+
+
+
+## All PBT: bubble plot visualization
+
+Here, we will produce a bubble plot to match those produced above for normal brain, in each pediatric brain tumor type in our cohort.
+
+```{r load_bulk_counts, cache = FALSE}
+
+info_samples <- read_tsv(here("data/RNAseq/pipeline_l3/2023-05-test_pbt/info.samples.tsv"))
+
+counts_lineage <- extract_pipeline_counts(
+    path = here("data/RNAseq/pipeline_l3/2023-05-test_pbt/counts/Ensembl.ensGene.exon.norm.tsv.gz"),
+    goi = tfs$Gene_hg) %>%
+    mutate(gene_symbol = factor(gene_symbol, levels = tfs$Gene_hg)) %>%
+    left_join(info_samples, by = c("sample" = "Nickname")) %>%
+    mutate(Group = factor(Group, levels = names(palette_groups)))
+
+```
+
+For this, we will take the median of the DESeq2-normalized expression in each group.
+
+```{r}
+
+counts_foxr2_medians <- counts_lineage %>%
+    group_by(Group, gene_symbol, gene_ensg) %>%
+    summarize(median_expr = median(gene_expression)) %>%
+    ungroup() %>%
+    mutate(log10_median_expr = log10(median_expr))
+
+```
+
+Create a bubbleplot, encoding median expression in each tumor type. Gene expression values where
+the log10 expression is <1 are not shown.
+
+Minimal set of TFs: (used in figures)
+
+```{r bulk_RNAseq_bubble_min, fig.width = 5, fig.height = 4.5, echo_fig = TRUE}
+
+counts_foxr2_medians %>%
+    filter(log10_median_expr >= 1) %>%
+    filter(gene_symbol %in% tfs_min$Gene_hg) %>% 
+    mutate(gene_symbol = factor(gene_symbol, levels = rev(tfs_min$Gene_hg))) %>%
+    ggplot(aes(x = Group, y = gene_symbol), plot_num = 1) +
+    geom_point(aes(size = log10_median_expr, colour = log10_median_expr), alpha = 0.8) +
+    scale_radius(range = c(0, 10)) +
+    scale_color_gradientn(colours = ylrd) +
+    theme_min2() +
+    rotate_x() +
+    theme(panel.grid.major.x = element_line(colour = "grey90"),
+          panel.border = element_blank(),
+          axis.ticks.x = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.text.y = element_text(size = 13)) +
+    ggtitle("Normalized expression in \nbulk tumor types")
+
+```
+
+
+## NB-FOXR2 and DIPG-FOXR2
+
+DIPG-H3K27M tumors with FOXR2 alteration are a useful control to help understand the effect of FOXR2 alteration. For example, if FOXR2 itself activates the MGE TFs, they would also be expressed in DIPG-H3K27M-FOXR2.
+
+Plotting bulk RNA expression of the MGE TF fingerprint in NB-FOXR2 vs. DIPG with FOXR2 alteration.
+
+Since the genes differ in their range of expression, we set a y axis scale of 7000 per gene,
+except FOXR2.
+
+```{r NB-FOXR2_vs_FOXR2_DIPG_7k, fig.width = 16, fig.height = 2.75}
+
+y_maxes <- rep(x = 7000,
+               times = length(tfs_no_ecnb$Gene_hg))
+names(y_maxes) <- tfs_no_ecnb$Gene_hg
+y_maxes[which(names(y_maxes) == "FOXR2")] <- 2000
+
+tf_exp_boxplots(y_maxes = y_maxes,
+                counts = counts_lineage %>% 
+                    filter(Group %in% c("NB-FOXR2",
+                                        "DIPG-H3K27M-FOXR2")),
+                palette = palette_groups,
+                label_y = c(1,2))
+
+```
+
+Print the list of tumors in order, to label the rows of this plot:
+
+```{r}
+
+names(palette_groups)[c(1,2)]
+
+```
+
+## EC-NB 
+
+Here, we will inspect bulk expression of the MGE TF fingerprint in extracranial neuroblastoma (EC-NB), to ensure that they are not activated universally across neuroblastoma, and to ensure the fingerprint is not specifically activated in FOXR2+ EC-NB.
+
+We are using two different datasets of EC-NB to confirm our findings are robust.
+
+1. Gartlgruber et al. *Nature Cancer* 2021
+2. TARGET neuroblastoma cohort
+
+### Gartlgruber et al. 2021
+
+Load cohort data:
+
+```{r load-ecnb}
+
+load(here("output/03/Gartlgruber_et_al_counts.Rda"))
+rm(ecnb_counts_norm)
+rm(ecnb_counts_vst)
+
+# DESeq norm expression threshold used for FOXR2 +/-
+threshold <- 2
+
+foxr2_pos_samples <- ecnb_counts_tidy %>% 
+    filter(gene_symbol == "FOXR2") %>% 
+    filter(gene_expression > threshold) %>% 
+    .$sample
+
+ecnb_counts_tidy <- ecnb_counts_tidy %>% mutate(FOXR2_positive = case_when(sample %in% foxr2_pos_samples ~ "Y",
+                                      T ~ "N"))
+ecnb_counts_tidy %>% filter(gene_symbol == "FOXR2") %>% select(MYCN, FOXR2_positive) %>% table
+
+```
+
+Set palette & add FOXR2/MYCN status.
+Group MYCN-amp together, and split MYCN non-amp by FOXR2+/-
+
+```{r set-ecnb-palette-mut}
+
+ecnb_counts_tidy %>% filter(gene_symbol == "FOXR2") %>% select(Risk, Stage) %>% table
+
+ecnb_counts_tidy <- ecnb_counts_tidy %>%
+    mutate(Group = case_when(
+        MYCN == "Amp" ~ "EC-NB: MYCN Amp",
+        MYCN == "NonAmp" & FOXR2_positive == "Y" ~ "EC-NB: FOXR2+, MYCN NonAmp",
+        MYCN == "NonAmp" & FOXR2_positive == "N" ~ "EC-NB: FOXR2-, MYCN NonAmp"))
+
+palette_groups_mut <- palette_groups
+palette_groups_mut <- c(palette_groups_mut, "EC-NB: MYCN Amp" = "#A575D3")
+palette_groups_mut <- c(palette_groups_mut, "EC-NB: FOXR2+, MYCN NonAmp" = "#f382c6")
+palette_groups_mut <- c(palette_groups_mut, "EC-NB: FOXR2-, MYCN NonAmp" = "#215ba3")
+
+```
+
+Subset to stage 4 and high risk samples only:
+
+```{r subset-ecnb}
+
+ecnb_counts_tidy_S4_HR <- ecnb_counts_tidy %>%
+                  filter(Risk == "HR") %>%
+                  filter(Stage == "4")
+
+```
+
+TF fingerprint, Y-axis set to 2.5k except for FOXR2
+
+```{r ecnb_boxplot-stage4-highrisk, fig.width = 20, fig.height = 5.5}
+
+y_maxes <- rep(2500, times = length(tfs_no_ecnb$Gene_hg))
+names(y_maxes) <- tfs_no_ecnb$Gene_hg
+y_maxes[which(names(y_maxes) %in% c("FOXR2"))] <- 450
+
+tf_exp_boxplots(y_maxes = y_maxes,
+                counts = ecnb_counts_tidy_S4_HR,
+                palette = palette_groups_mut,
+                label_y = c(1,2))
+
+```
+
+Print the list of tumors in order, to label the rows of this plot:
+
+```{r}
+
+names(palette_groups_mut)[c(13:15)] %>% rev
+
+```
+
+
+### TARGET cohort
+
+For extra-cranial neuroblastomas from TARGET dataset, data was processed in-house
+by Steven Hebert in April 2024. Data was subsetted to only high risk patients which were
+Stage 3 or 4. (4S not included.) This gave a total of 128 patient samples.
+
+Original gene annotation in this data differs from our pipeline gene IDs. Therefore, Steven
+intersected their Ensembl IDs with Ensembl IDs in our pipeline gene annotation, and 
+removed all other gene entries. These modified counts matrices are stored at:
+
+```
+/project/kleinman/steven.hebert/from_narval/2024/2023-05-16-FOXR2paper/2024-01-29-revision/EC-NB-TARGET_counts/counts_ensembl_common
+```
+
+Load DESeq-normalized counts (e.g. for plotting gene expression box plots)
+
+```{r load-ecnb-target-norm-counts}
+
+# load NORM counts
+target_norm <- here("data/RNAseq/external_data/TARGET_ECNB/counts_ensembl_common/GENCODEv36.norm.tsv.gz") %>%
+    read.table(header = T, row.names = 1, check.names = F, sep = "\t")
+
+target_norm[1:5, 1:5]
+
+```
+
+Create metadata for FOXR2 expression status:
+
+```{r ecnb-target-foxr2-positivity}
+
+# DESeq norm expression threshold used for FOXR2 +/-
+threshold <- 2
+
+target_counts_tidy <- target_norm %>% 
+    as.data.frame() %>% 
+    rownames_to_column("ID") %>% 
+    separate(col = "ID", sep = ":", into = c("ENS", "gene_symbol")) %>% 
+    pivot_longer(cols = -c("ENS", "gene_symbol"), names_to = "sample", values_to = "gene_expression") 
+    
+foxr2_pos_samples_target <- target_counts_tidy %>% 
+    filter(gene_symbol == "FOXR2") %>% 
+    filter(gene_expression > threshold) %>% 
+    .$sample 
+
+target_counts_tidy <- target_counts_tidy %>% 
+    mutate(FOXR2_positive = case_when(sample %in% foxr2_pos_samples_target ~ "Y",
+                                      T ~ "N")) %>% 
+    distinct %>%     
+    mutate(Group = case_when(
+        FOXR2_positive == "Y" ~ "EC-NB: FOXR2+",
+        FOXR2_positive == "N" ~ "EC-NB: FOXR2-")) %>% 
+    mutate(Group = factor(Group, levels = c("EC-NB: FOXR2+",
+                                            "EC-NB: FOXR2-")))
+
+
+```
+
+TF fingerprint. 
+
+Since the genes differ in their range of expression, we set a y axis scale of 7000 per gene,
+except FOXR2.
+
+```{r ecnb_target_boxplot_foxr2_7k, fig.width = 15, fig.height = 2.75}
+
+palette_groups_mut_2 <- palette_groups
+palette_groups_mut_2 <- c(palette_groups_mut_2, "EC-NB: FOXR2+" = "#f382c6")
+palette_groups_mut_2 <- c(palette_groups_mut_2, "EC-NB: FOXR2-" = "#215ba3")
+
+y_maxes <- c(rep(7000, times = length(tfs_no_ecnb$Gene_hg)))
+names(y_maxes) <- tfs_no_ecnb$Gene_hg
+y_maxes[which(names(y_maxes) %in% c("FOXR2"))] <- 1000
+# y_maxes[which(names(y_maxes) %in% c("DBH"))] <- 40000
+
+tf_exp_boxplots(y_maxes = y_maxes,
+                counts = target_counts_tidy,
+                palette = palette_groups_mut_2,
+                label_y = c(1,2))
+
+```
+
+Print the list of tumors in order, to label the rows of this plot:
+
+```{r}
+
+names(palette_groups_mut_2)[c(13:14)]
+
+```
+
+## NB-FOXR2 only
+
+FOXR2 positivity is also found in some extracranial neuroblastomas, and it is possible that FOXR2 activates key markers and transcription factors of EC-NB even within NB-FOXR2.
+
+To confirm this is not the case, we plot the expression of both MGE TFs & EC-NB TFs in NB-FOXR2.
+
+```{r nb-foxr2-boxplot-mge-ecnb-tfs, fig.height = 6, fig.width=6}
+
+tfs_mge_ecnb <- tfs$Gene_hg[which(!(tfs$Gene_hg %in% c("PAX6",
+                                               "EMX1",
+                                               "EMX2",
+                                               "TBR1",
+                                               "EOMES",
+                                               "GSX2",
+                                               "DLX1",
+                                               "DLX2",
+                                               "FOXR2")))]
+
+df <- counts_lineage %>% 
+    filter(Group %in% c("NB-FOXR2")) %>% 
+    filter(gene_symbol %in% tfs_mge_ecnb)
+
+df$gene_symbol <- factor(df$gene_symbol, 
+                         rev(c("FOXG1",
+                               "NKX2-1",
+                               "LHX6",
+                               "DLX5",
+                               "DLX6",
+                               "PHOX2B",
+                               "ISL1",
+                               "GATA3",
+                               "LMO1",
+                               "DBH",
+                               "HAND1",
+                               "HAND2",
+                               "ASCL1")))
+
+
+df %>% 
+    ggplot(aes(x = gene_symbol, y = gene_expression, fill = "red")) +
+    geom_boxplot(outlier.shape = NA) +
+    #geom_jitter(size = 2, alpha = 0.8) +
+    ylab("Normalized expression") + xlab("Gene") +
+    scale_fill_manual(values = c("red")) +
+    ylim(0,7500)+
+    no_legend() + coord_flip() +
+    ggtitle("MGE & ECNB TF expression in NB-FOXR2")
+
+
+
+```
+
+### ASCL1 & HAND2 expression across intracranial tumors
+
+We see in the previous plot that NB-FOXR2 do express ASCL1 and HAND2, characteristic factors of extracranial neuroblastoma. 
+
+Here, we investigate whether these two markers are also expressed across the other bulk intracranial tumors of our cohort, meaning they are not specific to neuroblastoma or FOXR2+ tumors. Outlier points were removed from violin plots.
+
+```{r load_ascl_hand2_counts}
+
+# load counts 
+counts_ASCL1_HAND2 <- extract_pipeline_counts(path = here("data/RNAseq/pipeline_l3/2023-05-test_pbt/counts/Ensembl.ensGene.exon.norm.tsv.gz"),
+                                        goi = c("ASCL1", "HAND2")) %>% 
+    left_join(info_samples, by = c("sample" = "Nickname")) %>% 
+    mutate(Group = factor(Group, levels = names(palette_groups)))
+
+```
+
+```{r ascl1_expression_all, fig.height=5, fig.width=8}
+
+counts_ASCL1_HAND2 %>%
+    filter(gene_symbol == "ASCL1") %>% 
+    mutate(Group = factor(Group, c("NB-FOXR2",
+                                 "HGG-H3.3G34R/V",
+                                 "DIPG-H3K27M-FOXR2",
+                                 "DIPG-H3K27M",
+                                 "HGG-IDH",
+                                 "EP-PFA",
+                                 "ETMR",
+                                 "MB-SHH",
+                                 "MB-WNT"))) %>% 
+    ggplot(aes(x = Group, y = gene_expression, fill = Group)) +
+    geom_boxplot(aes(fill = Group), outlier.shape = NA) +
+    coord_cartesian(ylim = c(0,10000)) +
+    #geom_jitter(size = 2, alpha = 0.8) +
+    scale_fill_manual(values = palette_groups)  +
+    ylab("Normalized expression") + xlab("Group") +
+    no_legend() + rotate_x() +
+    ggtitle("ASCL1 expression")
+
+```
+
+
+```{r hand2_expression_all, fig.height=5, fig.width=8}
+
+counts_ASCL1_HAND2 %>%
+    filter(gene_symbol == "HAND2") %>% 
+    mutate(Group = factor(Group, c("NB-FOXR2",
+                             "HGG-H3.3G34R/V",
+                             "DIPG-H3K27M-FOXR2",
+                             "DIPG-H3K27M",
+                             "HGG-IDH",
+                             "EP-PFA",
+                             "ETMR",
+                             "MB-SHH",
+                             "MB-WNT"))) %>% 
+    ggplot(aes(x = Group, y = gene_expression, fill = Group)) +
+    geom_boxplot(aes(fill = Group), outlier.shape = NA) +
+    coord_cartesian(ylim = c(0,5000)) +
+    #geom_jitter(size = 2, alpha = 0.8) +
+    scale_fill_manual(values = palette_groups)  +
+    ylab("Normalized expression") + xlab("Group") +
+    no_legend() + rotate_x() +
+    ggtitle("HAND2 expression")
+
+```
+
+## All PBT
+
+Since the genes differ in their range of expression, we set a y axis scale of 7000 per gene,
+except FOXR2.
+
+Plot MGE TF Fingerprint in all tumors except DIPG-FOXR2 (which was plotted above):
+
+```{r boxplots_bulk_TFs_7k, fig.width = 16, fig.height = 7, echo_fig = TRUE}
+
+y_maxes <- rep(x = 7000,
+               times = length(tfs_no_ecnb$Gene_hg))
+names(y_maxes) <- tfs_no_ecnb$Gene_hg
+y_maxes[which(names(y_maxes) == "FOXR2")] <- 2000
+
+tf_exp_boxplots(y_maxes = y_maxes,
+                counts = counts_lineage %>% filter(Group != "DIPG-H3K27M-FOXR2"),
+                palette = palette_groups,
+                label_y = c(1,2))
+
+```
+
+Print the list of tumors in order, to label the rows of this plot:
+
+```{r}
+
+names(palette_groups)[c(1,3:9)]
+
+```
+
+## OL marker expression in all PBT
+
+We will also inspect expression of key oligodendrocyte markers across intracranial tumor types for comparison with NB-FOXR2.
+
+Load data:
+
+```{r load-bulk-rna-OL-markers}
+
+info_samples <- read_tsv(file.path(here("data/RNAseq/pipeline_l3/2023-05-test_pbt/info.samples.tsv")))
+
+counts_bulk <- extract_pipeline_counts(path = file.path(here("data/RNAseq/pipeline_l3/2023-05-test_pbt/counts/Ensembl.ensGene.exon.norm.tsv.gz")),
+                                        goi = c("OLIG2","SOX10","PDGFRA")) %>% 
+    left_join(info_samples, by = c("sample" = "Nickname")) %>% 
+    mutate(Group = factor(Group, levels = names(palette_groups)))
+
+
+```
+
+Produce box plots:
+
+```{r box-plot-bulk-rna-OL-markers, fig.width = 10, fig.height = 5}
+
+counts_bulk %>%
+    ggplot(aes(x = Group, y = gene_expression)) +
+    geom_boxplot(aes(fill = Group), outlier.shape = NA) +
+    geom_jitter(size = 2, alpha = 0.8) +
+    scale_fill_manual(values = palette_groups)  +
+    facet_wrap(. ~ gene_symbol, scales = "free_y") +
+    ylab("Normalized expression") + xlab("Group") +
+    no_legend() + rotate_x() 
+
+```
+
+# Tumor scRNAseq
+
+Here, we will inspect expression of the MGE TF fingerprint (developed in above sections) 
+as well as key transcription factors and gene markers for extracranial neuroblastoma 
+(EC-NB), in bulk RNAseq profiles of human tumors (intracranial pediatric brain tumors as well as EC-NB).
+
+## Load data
+
+Load per-sample seurat objects:
+
+```{r load_sc_samples, cache = FALSE}
+
+samples_sc <- map(sc_samples_foxr2, ~ get(load(meta_sc[meta_sc$ID == .x, ]$Path)))
+names(samples_sc) <- sc_samples_foxr2
+
+```
+
+Get normal/malignant calls:
+
+```{r load_sc_normal_malig, cache = F}
+
+load(here("output/04/merged_sc_meta.Rda"))
+
+# correct a discrepancy in how barcodes are named for the multiome sample
+samples_sc$`P-6778_S-10155`@meta.data$cell.barcode <- samples_sc$`P-6778_S-10155`@meta.data$gex_barcode
+merged_sc_meta <- merged_sc_meta %>%
+    mutate(cell.barcode = ifelse(is.na(cell.barcode), gex_barcode, cell.barcode))
+
+# load the malignant normal calls and add them to each seurat object
+samples_sc <- map(samples_sc, function(seurat) {
+
+    # sanity check that cell order is preserved in each metadata slot
+    merged_barcodes <- merged_sc_meta %>% filter(cell.barcode %in% seurat@meta.data$cell.barcode) %>% pull(cell.barcode)
+    all(seurat@meta.data$cell.barcode == merged_barcodes)
+
+    tumor_normal <- merged_sc_meta %>% filter(cell.barcode %in% seurat@meta.data$cell.barcode) %>% pull(Malignant_normal)
+    seurat <- AddMetaData(seurat, tumor_normal, "Malignant_normal")
+
+    return(seurat)
+
+})
+
+```
+
+## Generate bubbleplots
+
+Define function to plot bubble plot in each sample, split by normal and 
+malignant cells, and annotated with the number of cells in each group:
+
+<details>
+
+```{r tumor_sc_bubble, cache = F}
+
+plot_bubble_tumor_norm_mal_pseudobulk <- function(seurat, id, tf_list,
+                                                  collapse_likely = FALSE,
+                                                  remove_gene_labels = FALSE) {
+
+    tfs <- tf_list
+
+    # if specified in arguments, collapse "Likely normal" cells into "Normal" category
+    if(collapse_likely){
+
+      categories <- c("Normal", "Malignant")
+      new_meta <- seurat@meta.data %>%
+        select("Malignant_normal") %>%
+        mutate(Malignant_normal = case_when(Malignant_normal %in% c("Normal", "Likely normal") ~ "Normal",
+                                            Malignant_normal == "Malignant"                    ~ "Malignant"))
+      seurat <- AddMetaData(seurat, new_meta)
+      rm(new_meta) # clean up
+
+    } else {
+
+      categories <- c("Normal", "Likely normal", "Malignant")
+
+    }
+
+    # get number of cells in each category
+    n_cells_per_category <- seurat@meta.data %>%
+      select("Malignant_normal") %>%
+      group_by(Malignant_normal) %>%
+      summarize("N" = n()) %>%
+      mutate(N = glue("n = {N}")) %>%
+      dplyr::rename(Cluster = Malignant_normal)
+
+    # extract average expression and detection rate per cluster for the TF
+    # fingerprint genes
+    df <- extract_meanexp_pct(
+        seurat,
+        genes = tfs$Gene_hg,
+        cluster_col = "Malignant_normal",
+        scale = TRUE)
+
+    # add empty rows for the missing genes/clusters
+    df_complete <- df %>%
+        mutate(Gene = factor(Gene, levels = tfs$Gene_hg),
+               Cluster = factor(Cluster, levels = c("dummy", unique(.$Cluster)))) %>%
+        complete(Gene, Cluster, fill = list(Expression = 0, Pct1 = 0))
+
+    # add a dummy cluster that expresses all genes, to force showing all genes
+    df_complete[df_complete$Cluster == "dummy", ]$Expression <- 0.1
+    df_complete[df_complete$Cluster == "dummy", ]$Pct1 <- 0.1
+
+    # make the bubbleplot
+    p <- plot_bubble(df_complete %>% filter(Pct1 >= 0.01),
+                genes = tfs$Gene_hg,
+                cluster_order = c(categories, "dummy"),
+                max_radius = 10) +
+        ggtitle(id) +
+        theme(legend.position = "bottom",
+              legend.box = "vertical") +
+        geom_text(data = n_cells_per_category,
+                  aes(y = (length(tfs$Gene_hg) + 1), label = N),
+                  angle = 45, vjust = -1, hjust = 0) +
+        expand_limits(y = c(-1, (length(tfs$Gene_hg) + 6 )))
+
+    if(remove_gene_labels){
+      p <- p + theme(axis.text.y = element_blank())
+    }
+
+    return(p)
+
+}
+
+```
+
+</details>
+
+Minimal TF set:
+
+(Note that only the Malignant cells column for each sample was used in the final figure.)
+
+```{r bubble-plot-sc-tumors-min-tf-mal-only, fig.width = 14, fig.height = 7, echo_fig = TRUE, cache = F}
+
+imap(samples_sc, ~ plot_bubble_tumor_norm_mal_pseudobulk(.x, .y,
+                                                         tf_list = tfs_min,
+                                                         collapse_likely = TRUE)) %>%
+    {plot_grid(plotlist = ., nrow = 1,
+               align = "h", axis = "tblr")}
+
+```
+
+
+# FOXR2-transduced human NSCs
+
+Here, we load bulk RNAseq from [Tsai et al. *Cancer Research* 2022](https://pubmed.ncbi.nlm.nih.gov/35802025/)
+where the authors transduced H9 human neural stem cells with HA-FOXR2 expression.
+
+We will compare the expression of our TF fingerprint in FOXR2-transduced vs.
+control (transduced with Hc-Red control vector) hNSCs, to assess whether 
+FOXR2 itself can lead to expression of the TF fingerprint.
+
+## Load data 
+
+
+```{r hnsc_counts}
+
+# define mouse and human TFs
+tfs <- tribble(~Gene_hg, ~Gene_mm,
+               "FOXR2",  "Foxr2",
+               "FOXG1",  "Foxg1",
+               "PAX6",   "Pax6",
+               "EMX1",   "Emx1",
+               "EMX2",   "Emx2",
+               "TBR1",   "Tbr1",
+               "EOMES",  "Eomes",
+               "GSX2",   "Gsx2",
+               "NKX2-1", "Nkx2-1",
+               "LHX6",   "Lhx6",
+               "DLX1",   "Dlx1",
+               "DLX2",   "Dlx2",
+               "DLX5",   "Dlx5",
+               "DLX6",   "Dlx6")
+
+info_samples_hNSC <- read_tsv(here("data/RNAseq/pipeline_l3/2023-04-FOXR2_hNSCs/info.samples.tsv"))
+info_samples_hNSC %>% select(Nickname, Group)
+
+# load counts for FOXR2
+counts_nsc <- extract_pipeline_counts(path = here("data/RNAseq/pipeline_l3/2023-04-FOXR2_hNSCs/counts/Ensembl.ensGene.exon.norm.tsv.gz"),
+                                      goi = tfs$Gene_hg) %>%
+    left_join(info_samples_hNSC, by = c("sample" = "Nickname"))
+
+palette_nsc <- c("FOXR2" = "red", "Control" = "gray90")
+
+```
+
+## Generate box plots
+
+Define a function to plot hNSC FOXR2 vs. control TF expression as a box plot:
+
+<details>
+
+```{r boxplot-function-hnsc}
+
+# Input:
+# - y_maxes: vector of y-axis maximum values, named with the gene symbols to plot
+#   --> e.g. c("FOXR2" = 2000, "LHX6" = 4000)
+# - counts: tidy counts matrix which includes columns: gene_symbol, gene_expression, sample, Group
+# - palette: palette for Group variable in counts matrix  
+# - label_y: OPTIONAL list of indices for box plots that require y axis value labels
+#   --> e.g. c(1,2)
+#   --> If not provided, only the first box plot will have a label (= c(1))
+# - strip_label: OPTIONAL boolean (T/F) whether to add right side strip label for "group"
+#   --> default is False (no label)
+
+tf_exp_boxplots_hnsc <- function(y_maxes,
+                            counts,
+                            palette,
+                            label_y = c(1),
+                            strip_label = F) {
+    
+    
+    # loop over genes & the maximum y values for each gene,
+    # making boxplots for each gene as 1 column to be combined with plot_grid
+    # .x = ymaxes (vector values), .y = genes (vector names)
+    plots <- imap(y_maxes,
+                  ~ counts %>%
+                      # subset counts
+                      filter(gene_symbol == .y) %>%
+                      mutate(Group = factor(Group, levels = c("FOXR2", "Control"))) %>% 
+                      ggplot(aes(x = factor(1), y = gene_expression)) +
+                      # make boxplot with jittered points
+                      geom_boxplot(aes(fill = Group), outlier.shape = NA, width = 0.3) +
+                      geom_jitter(aes(fill = Group), size = 0.5, width = 0.2, shape = 21) +
+                      scale_fill_manual(values = palette)  +
+                      facet_wrap(~ gene_symbol, nrow = 1) +
+                      # subset the plotting area (y-axis) to the specified y-max value
+                      coord_cartesian(ylim = c(0, .x)) +
+                      # only show the min and max of the y-axis
+                      scale_y_continuous(breaks = c(0, .x)) +
+                      theme_min2() +
+                      no_legend() + ggtitle(.y) + xlab(NULL) + ylab(NULL) +
+                      # put the group label on the right instead of the top
+                      theme(strip.text.x = element_text(angle = 0, size = 2)) +
+                      theme(aspect.ratio = 2))
+    
+    if(strip_label){
+        # remove the y-axis strip labels in all but the last plot
+        plots[1:(length(y_maxes) - 1)] <- map(plots[1:(length(y_maxes) - 1)], ~ .x + theme(strip.text.y = element_blank()))
+    } else {
+        # remove the y-axis strip labels in ALL plots
+        plots[1:length(y_maxes)] <- map(plots[1:length(y_maxes)], ~ .x + theme(strip.text.y = element_blank()))
+    }
+
+    # remove the y-axis value labels for all except specified plots
+    y_axis_rem <- setdiff(1:length(y_maxes), label_y)
+    plots[y_axis_rem] <- map(plots[y_axis_rem], ~ .x + theme(axis.text.y = element_blank()))
+    
+    plot_grid(plotlist = plots, nrow = 1, align = "h", axis = "tb")
+}
+
+
+```
+
+</details>
+
+Generate plot:
+
+Since the genes differ in their range of expression, we set a y axis scale of 7000 per gene,
+except FOXR2.
+
+```{r hnsc_boxplot-7k-no-ecnb-tfs, fig.width = 15, fig.height = 1.75}
+
+# Print max value of gene expression (except FOXR2)
+counts_nsc %>% 
+    filter(gene_symbol != "FOXR2") %>%
+    filter(gene_symbol %in% tfs_no_ecnb$Gene_hg) %>%
+    arrange(-gene_expression) %>%
+    .$gene_expression %>%
+    .[1]
+
+y_maxes_nsc <- rep(7000, times = length(tfs_no_ecnb$Gene_hg))
+names(y_maxes_nsc) <- tfs_no_ecnb$Gene_hg
+y_maxes_nsc[which(names(y_maxes_nsc) %in% c("FOXR2"))] <- 200000
+
+tf_exp_boxplots_hnsc(y_maxes = y_maxes_nsc,
+                counts = counts_nsc %>%
+                            mutate(Group = factor(Group, levels = c("FOXR2", "Control"))),
+                palette = palette_nsc,
+                label_y = c(1,2))
+
+```
+
+
+<!-- END MATTER, insert reproducibility info -->
+
+```{r footer, echo = FALSE, results = 'asis', warning = FALSE, cache = FALSE}
+
+# Knit child document with header
+res <- knitr::knit_child(here("include", "footer.Rmd"), envir = environment(), quiet = TRUE)
+cat(res, sep = '\n')
+
+```
+
+<!-- END OF END MATTER -->

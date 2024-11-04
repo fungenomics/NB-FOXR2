@@ -1,0 +1,1463 @@
+---
+title: "07.2 - Murine models of NB-FOXR2: validation"
+author: "Selin Jessa [[selin.jessa@mail.mcgill.ca](mailto:selin.jessa@mail.mcgill.ca)] and Bhavyaa Chandarana [[bhavyaa.chandarana@mail.mcgill.ca](mailto:bhavyaa.chandarana@mail.mcgill.ca)]"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    self_contained: yes
+    keep_md: yes
+    code_folding: show
+    theme: flatly
+    css: ../include/style.css
+    toc: yes
+    toc_depth: 4
+    number_sections: true
+    df_print: paged
+    includes:
+      before_body: ../include/header.html
+      after_body:  ../include/footer.html
+---
+
+<!-- FRONT MATTER, insert configuration info -->
+
+```{r header, echo = FALSE, results = 'asis', warning = FALSE}
+
+# Index of the document
+# ...determines name of the subfolder of `outputs` and `figures`
+doc_id <- "07.2"
+
+suppressMessages(library(here))
+
+# Knit child document with header
+res <- knitr::knit_child(here("include", "header.Rmd"), envir = environment(), quiet = TRUE)
+cat(res, sep = '\n')
+
+```
+
+<!-- END OF FRONT MATTER -->
+
+
+# Overview
+
+In this document, we analyze murine models generated through _in utero_ electroporation
+of constructs with Foxr2, or Foxr2 and p53 LOF, into the mouse ganglionic
+eminences. 
+
+Here, we ask whether the IUE mouse models (profiled by 10X Multiome) are good models 
+of human NB-FOXR2 tumors. Are they more similar to NB-FOXR2 than to other pediatric 
+brain tumors?
+
+# Libraries & functions
+
+```{r libs, warning = FALSE, message = FALSE, echo = TRUE, cache = FALSE}
+
+library(here) 
+library(magrittr)
+library(tidyr)
+library(dplyr)
+library(readr)
+library(readxl)
+library(stringr)
+library(glue)
+library(purrr)
+library(ggplot2)
+library(cowplot)
+library(Seurat)
+library(Signac)
+library(ComplexHeatmap)
+library(tibble)
+library(ggridges)
+library(GSVA)
+library(ggVennDiagram)
+library(ggrepel)
+library(plotly)
+
+source(here("include/style.R"))
+source(here("code/functions/scRNAseq.R"))
+source(here("code/functions/RNAseq.R"))
+source(here("code/functions/ssGSEA.R"))
+
+ggplot2::theme_set(theme_min())
+
+square_theme <- theme(aspect.ratio = 1)
+large_text <- theme(text = element_text(size = 15))
+
+conflicted::conflicts_prefer(base::setdiff)
+conflicted::conflicts_prefer(dplyr::filter)
+
+conflicted::conflicts_prefer(graphics::layout)
+
+```
+
+Functions to convert genes from hg to mm (functions adapted from bulk pipeline by Steven, 
+further adapted by me):
+
+<details>
+
+```{r hg_to_mm_function, class.source = 'fold.hide'}
+
+mouse_human_genes <- data.table::fread("/project/kleinman/steven.hebert/from_narval/2024/2023-05-16-FOXR2paper/2024-01-29-revision/2024-03-06-human_NB-FOXR2_signatures_bulk/signature_enrichment_Compendium/input/mm10_hg19_ensembl_symbol_raptor_unique.tsv")
+
+# Convert list of genes from human to mouse
+# Return mouse genes
+hg_to_mm_pipeline <- function(hg_genes, ref) {
+
+  # To keep the order of the genes supplied, we need to join using the hg_genes vector
+  hg_ensembl = map_chr(str_split(hg_genes, ":"),1) %>% as.data.frame()
+  colnames(hg_ensembl) = "hg_ensembl_gene_id"
+  mm_ID = hg_ensembl %>%
+    inner_join(.,ref) %>%
+    mutate(mm_ID = paste(mm_ensembl_gene_id, mm_symbol_id, sep = ":")) %>%
+    pull(mm_ID)
+
+  return(mm_ID)
+}
+
+# Convert list of genes from mouse to human
+# Return human genes
+mm_to_hg_pipeline <- function(mm_genes, ref) {
+
+  # To keep the order of the genes supplied, we need to join using the mm_genes vector
+  mm_ensembl = map_chr(str_split(mm_genes, ":"),1) %>% as.data.frame()
+  colnames(mm_ensembl) = "mm_ensembl_gene_id"
+  hg_ID = mm_ensembl %>%
+    inner_join(.,ref) %>%
+    mutate(hg_ID = paste(hg_ensembl_gene_id, hg_symbol_id, sep = ":")) %>%
+    pull(hg_ID)
+
+  return(hg_ID)
+}
+
+# Convert genes from human to mouse
+# Returns df of equivalent human and mouse genes (dataframe)
+hg_to_mm_pipeline_df <- function(hg_genes, ref){
+
+  # To keep the order of the genes supplied, we need to join using the hg_genes vector
+  hg_ensembl = map_chr(str_split(hg_genes, ":"),1) %>% as.data.frame()
+  colnames(hg_ensembl) = "hg_ensembl_gene_id"
+  mm_ID = hg_ensembl %>%
+    inner_join(.,ref) %>%
+    mutate(mm_ID = paste(mm_ensembl_gene_id, mm_symbol_id, sep = ":"),
+           hg_ID = paste(hg_ensembl_gene_id, hg_symbol_id, sep = ":"))
+
+ }
+
+```
+
+</details>
+
+# Load mouse model single-cell data
+
+We have two genotypes:
+
+1. Foxr2 overexpression (OE) with p53LOF (sample `Foxr2_p53_r1` aka `AN24377`)
+2. Foxr2 overexpression (OE) alone (samples `Foxr2_r1` aka `M7238`, and `Foxr2_r2` aka `AN22476`)
+
+Each sample comes from a separate mouse, hence these are biological, not technical replicates.
+
+```{r load_samples, cache = FALSE}
+
+mouse_samples <- c("Foxr2_p53_r1" = "AN24377",
+                   "Foxr2_r1"     = "M7238",
+                   "Foxr2_r2"     = "AN22476")
+
+# load all three objects into a list
+seurat_mouse <- map(mouse_samples, ~ get(load(here(glue("data/singlecell/pipeline_scMultiome_mm/{.x}/seurat.Rda")))))
+names(seurat_mouse) <- names(mouse_samples)
+
+# For now, we will not use the ATAC, so let's make a "light" version of the objects
+seurat_mouse <- map(seurat_mouse,
+                    function(seurat){
+                        
+                            seurat[['ATAC']] <- NULL
+                            seurat[['peaks']] <- NULL
+                            seurat[['promoters']] <- NULL
+                        
+                        return(seurat)
+                    })
+
+load(here("output/07.1/seurat_mouse_metadata.Rda"))
+seurat_mouse <- map2(seurat_mouse, seurat_mouse_metadata,
+                     function(seurat, meta) {
+                         seurat@meta.data <- meta %>% 
+                             column_to_rownames("Cell")
+                         return(seurat)
+                     })
+
+
+```
+
+# Comparison with human tumors
+
+We will compare single-nuclei transcriptomic datasets of mouse models to bulk 
+transcriptomic datasets of human pediatric brain tumors (PBT). 
+
+We will use the following comparators for pairwise differential expression:
+
+* **DIPG-H3K27M** (glial tumor)
+* **MB-WNT** (neuronal tumor)
+* **ETMR** (neuronal tumor)
+* **NB-FOXR2** 
+
+For the NB-FOXR2, we observe batch effect between the in-house samples 
+and samples from Korshunov publication, so we restricted to in-house samples
+for this differential expression.
+
+For the DIPG-H3K27M group, we removed the following three samples with 
+low tumor purity (see ssGSEA tumor signature scoring "Top 10 signatures per sample"
+in R markdown document `06.1`):
+
+* P-6254_S-8499
+* P-5092_S-7792
+* P-6253_S-8498
+
+Note: in each case the NB-FOXR2 "side" of the DE corresponds to the negative 
+log fold change values, so I will filter signatures with this in mind.
+
+We will adapt signature filtering methods used in [McNicholas et al. *Cancer Discovery* 2023](https://pubmed.ncbi.nlm.nih.gov/37011011/) to create main Figure 3B.
+
+## Create consensus human tumor signatures
+
+Generate consensus signatures (across DE comparisons) for selected tumors to be
+compared with NB-FOXR2.
+
+First define a function to extract signatures from each DESeq result:
+
+<details>
+
+```{r function-extract-sigs, message = F, warning = FALSE}
+
+# Function to extract up- and down-regulated DE signatures from each DESeq result file.
+# - Set slice = NULL to take all DE genes.
+# - Group 1 of DESeq comparison (level3 pipeline) is negative fold change.
+# - Variable tumor_type_comparison is string in format "Tumor1vsTumor2".
+extract_sigs_all <- function(sigs_path,
+                             out_path,
+                             tumor_type_comparison,
+                             convert_hg_to_mm = FALSE,
+                             slice = 100){
+    
+    df <- data.table::fread(glue("{sigs_path}/{tumor_type_comparison}.tsv"))
+    head(df %>% arrange(stat))
+    head(df %>% arrange(desc(stat)))
+    
+    tumor_type_1 <- strsplit(tumor_type_comparison,
+                            split = "vs")[[1]][1]
+    tumor_type_2 <- strsplit(tumor_type_comparison,
+                            split = "vs")[[1]][2]
+    
+    sigs <- c()
+    sigs[[glue("{tumor_type_1}_vs_{tumor_type_2}")]] <- df %>% separate(ID, 
+                                   into = c("ENSG", "symbol"), 
+                                   sep = ":", remove = F) %>% 
+        filter(padj < 0.05 & baseMean > 100 & abs(log2FoldChange) > 1) %>%
+        filter(log2FoldChange < 0) %>% # Negative log fold change
+        filter(!grepl("^MT-", symbol)) %>% 
+        arrange(stat) %>% 
+        pull(ID)
+    
+    sigs[[glue("{tumor_type_2}_vs_{tumor_type_1}")]] <- df %>% separate(ID, 
+                                   into = c("ENSG", "symbol"), 
+                                   sep = ":", remove = F) %>% 
+        filter(padj < 0.05 & baseMean > 100 & abs(log2FoldChange) > 1) %>%
+        filter(log2FoldChange > 0) %>% # Positive log fold change
+        filter(!grepl("^MT-", symbol)) %>% 
+        arrange(desc(stat)) %>% 
+        pull(ID)
+    
+    if(convert_hg_to_mm){
+        
+        message(glue("@ {tumor_type_1} hg to mm"))
+        sigs[[glue("{tumor_type_1}_vs_{tumor_type_2}")]] <- sigs[[glue("{tumor_type_1}_vs_{tumor_type_2}")]] %>% 
+            hg_to_mm_pipeline(mouse_human_genes)
+        
+        message(glue("@ {tumor_type_2} hg to mm"))
+        sigs[[glue("{tumor_type_2}_vs_{tumor_type_1}")]] <- sigs[[glue("{tumor_type_2}_vs_{tumor_type_1}")]] %>% 
+            hg_to_mm_pipeline(mouse_human_genes)
+
+        
+    } 
+    
+    if(!is.null(slice)){
+        
+        message(glue("@ {tumor_type_1} top {slice}"))
+        sigs[[glue("{tumor_type_1}_vs_{tumor_type_2}")]] <- sigs[[glue("{tumor_type_1}_vs_{tumor_type_2}")]] %>% 
+            .[1:slice]
+        
+        message(glue("@ {tumor_type_2} top {slice}"))
+        sigs[[glue("{tumor_type_2}_vs_{tumor_type_1}")]] <- sigs[[glue("{tumor_type_2}_vs_{tumor_type_1}")]] %>% 
+            .[1:slice]
+        
+    }
+    
+    save(sigs, file = glue("{out_path}/{tumor_type_1}_vs_{tumor_type_2}_signatures.Rda"))
+    
+    data.table::fwrite(sigs[[glue("{tumor_type_1}_vs_{tumor_type_2}")]] %>% as.data.frame(),
+                       file = glue("{out_path}/{tumor_type_1}_vs_{tumor_type_2}_signatures{slice}.tsv", .null = ""),
+                       col.names = F)
+    data.table::fwrite(sigs[[glue("{tumor_type_2}_vs_{tumor_type_1}")]] %>% as.data.frame(),
+                       file = glue("{out_path}/{tumor_type_2}_vs_{tumor_type_1}_signatures{slice}.tsv", .null = ""),
+                       col.names = F)
+    
+    return(sigs)
+}
+```
+
+</details>
+
+1. Extract 2 lists of differentially expressed genes (upregulated & downregulated) per 
+DESeq comparison, and save.
+
+```{r comparator-sigs, message = F, warning = FALSE}
+
+# Get the list of DESeq comparisons from the level3 output folder
+sigs_path_comparators <- here("data/RNAseq/pipeline_l3/2024-04-human_comparator_tumor_signatures_rem_low_purity_DIPG/diff/Ensembl.ensGene.exon")
+comparisons <- list.files(sigs_path_comparators) %>% 
+    .[!grepl(x = ., pattern = ".QC")] %>% 
+    sub(pattern = ".tsv", replacement = "")
+comparisons <- comparisons[!grepl(comparisons, pattern = "HGG-IDH")]
+
+# Produces a list of paired signatures (up and down from each DESeq result) n=100 genes
+sigs_list_comparators_100 <- purrr::map(comparisons,
+        ~ extract_sigs_all(sigs_path = sigs_path_comparators,
+                     tumor_type_comparison = .x, 
+                     convert_hg_to_mm = TRUE,
+                     out_path = glue("{out}/signatures_v2_comparators")))
+names(sigs_list_comparators_100) <- comparisons
+save(sigs_list_comparators_100, 
+    file = glue("{out}/sigs_list_comparators_100.Rda"))
+
+# Produces a list of paired signatures (up and down from each DESeq result) ALL DE genes
+sigs_list_comparators <- purrr::map(comparisons,
+        ~ extract_sigs_all(sigs_path = sigs_path_comparators,
+                     tumor_type_comparison = .x, 
+                     convert_hg_to_mm = TRUE,
+                     out_path = glue("{out}/signatures_v2_comparators"),
+                     slice = NULL))
+names(sigs_list_comparators) <- comparisons
+save(sigs_list_comparators, 
+    file = glue("{out}/sigs_list_comparators.Rda"))
+
+```
+
+2. Get consensus signatures for each of the tumors.
+
+```{r consensus-comparators}
+
+comparator_tumor_types <- c("DIPG-H3K27M",
+                            "ETMR",
+                            "MB-WNT",
+                            "NB-FOXR2")
+
+# 1. Un-pair the signatures, so that they are all individual elements in one list
+# Get first list of each pair and concatenate:
+sigs_list_comparators_1 <- map(comparisons,
+                             ~ sigs_list_comparators[.x][[1]][1]) %>% Reduce(f = c)
+# Get second list of each pair, concatenate, and then merge with list above
+sigs_list_comparators_2 <- map(comparisons,
+                             ~ sigs_list_comparators[.x][[1]][2]) %>% Reduce(f = c)
+sigs_list_comparators_unpair <- c(sigs_list_comparators_1, sigs_list_comparators_2)
+
+# 2. Take the consensus with intersect for each of those comparator tumor types listed
+consensus_all_DE_comparators <- map(comparator_tumor_types,
+                                    ~ sigs_list_comparators_unpair[grepl(x = names(sigs_list_comparators_unpair), 
+                                                                  pattern = glue("^{.x}"))] %>% 
+                                        Reduce(f = intersect))
+names(consensus_all_DE_comparators) <- comparator_tumor_types
+save(consensus_all_DE_comparators, 
+     file = glue("{out}/consensus_all_DE_comparators.Rda"))
+
+map(consensus_all_DE_comparators, length)
+
+# 3. Get human version of comparator signatures 
+consensus_all_DE_comparators_hg <- map(consensus_all_DE_comparators,
+                                       ~ mm_to_hg_pipeline(mm_genes = .x, ref = mouse_human_genes))
+# Check no genes are lost during comparison back to human
+map(consensus_all_DE_comparators_hg, length)
+save(consensus_all_DE_comparators_hg, 
+     file = glue("{out}/consensus_all_DE_comparators_hg.Rda"))
+```
+
+3. Cut each comparator signature to 100 genes, based on average stat value across 
+DESeq comparisons with that tumor type.
+
+Define function to cut top 100 genes by stat value:
+
+<details>
+
+```{r}
+
+# Function to cut top 100 genes per signature
+cut_100_stat <- function(tumor_type_comparison_list, 
+                         tumor_type,
+                         gene_list,
+                         sigs_path){
+    
+    comparison_results <- data.frame(ID = paste0(mouse_human_genes$hg_ensembl_gene_id, ":", mouse_human_genes$hg_symbol_id))
+    
+    for(tumor_type_comparison in tumor_type_comparison_list){
+        
+        tumor_type_1 <- strsplit(tumor_type_comparison,
+                            split = "vs")[[1]][1]
+        tumor_type_2 <- strsplit(tumor_type_comparison,
+                            split = "vs")[[1]][2]
+    
+        if(tumor_type %in% c(tumor_type_1, tumor_type_2)){
+            
+            df <- data.table::fread(glue("{sigs_path}/{tumor_type_comparison}.tsv"))
+        
+            if(tumor_type == tumor_type_1){ # Negative log fold change & stat value
+                
+                df <- df %>% 
+                    select(ID, stat) %>% 
+                    mutate(stat = stat*-1) # Flip sign on values
+                
+                
+            } else if(tumor_type == tumor_type_2) { # Positive log fold change & stat value
+                
+                df <- df %>% 
+                    select(ID, stat) # Take values as-is
+                
+            }
+            
+            colnames(df)[which(colnames(df) == "stat")] <- tumor_type_comparison
+            
+            comparison_results <- left_join(comparison_results, df, by = "ID")
+        
+        }
+    }
+    
+    comparison_results$mean_stat <- rowMeans(comparison_results[,-1])
+    
+    top_100 <- comparison_results %>% 
+        filter(ID %in% gene_list) %>% 
+        arrange(desc(mean_stat)) %>% 
+        .$ID %>% 
+        .[1:100]
+    
+    return(top_100)
+    
+}
+
+```
+
+</details>
+
+Get top 100 genes:
+
+```{r}
+
+# Run function
+consensus_all_DE_comparators_hg_100 <- imap(consensus_all_DE_comparators_hg,
+                                           ~ cut_100_stat(gene_list = .x,
+                                                          tumor_type = .y,
+                                                          tumor_type_comparison_list = comparisons,
+                                                          sigs_path = sigs_path_comparators))
+map(consensus_all_DE_comparators_hg_100, length)
+save(consensus_all_DE_comparators_hg_100, 
+     file = glue("{out}/consensus_all_DE_comparators_hg_100.Rda"))
+
+# Get mouse version as well
+consensus_all_DE_comparators_mm_100 <- map(consensus_all_DE_comparators_hg_100,
+                                       ~ hg_to_mm_pipeline(hg_genes = .x, ref = mouse_human_genes))
+map(consensus_all_DE_comparators_mm_100, length)
+save(consensus_all_DE_comparators_mm_100, 
+     file = glue("{out}/consensus_all_DE_comparators_mm_100.Rda"))
+
+# Set up list of 6 signatures (NB-FOXR2 consensus sig from 8 signatures + 5 comparator signatures)
+sigs_list_ssgsea <- map(consensus_all_DE_comparators_mm_100,
+                        ~ map_chr(str_split(.x, ":"),2))
+names(sigs_list_ssgsea) <- names(consensus_all_DE_comparators_mm_100)
+
+save(sigs_list_ssgsea,
+     file = glue("{out}/sigs_list_ssgsea_mm.Rda"))
+
+# Do the same for human
+sigs_list_ssgsea_hg <- map(consensus_all_DE_comparators_hg_100,
+                        ~ map_chr(str_split(.x, ":"),2))
+names(sigs_list_ssgsea_hg) <- names(consensus_all_DE_comparators_hg_100)
+
+save(sigs_list_ssgsea_hg,
+     file = glue("{out}/sigs_list_ssgsea_hg.Rda"))
+
+```
+
+## NB-FOXR2 Signature volcano plots
+
+Here, we produce volcano plots of NB-FOXR2 vs. each other tumor type to illustrate
+the method of creating consensus signatures for the publication.
+
+We color here in red the 100 genes that appear in the final consensus signature for
+NB-FOXR2 across comparisons.
+
+Define function to plot volcano plots with highlighted genes 
+(modified from a function from Alva Annett).
+
+<details>
+
+```{r volcano-plot-function}
+
+volcano_gene_set <- function(df, log2fc = 1, pval=0.05, bm = 100, genes, name = '', labeled_genes = NULL){
+  
+  df <- df %>% 
+    filter(baseMean > bm)
+  
+  p <- df %>%
+    mutate(col = ifelse(SYM %in% genes, 'y', NA)) %>%
+    arrange(!is.na(col), col) %>% 
+    ggplot(aes(x=-log2FoldChange, y=-log10(padj), col=col, label = SYM)) +
+    geom_point(size=2, alpha=0.7) +
+    scale_color_manual(values=c(y = "red"), 
+                       na.value = "grey40") +
+    geom_vline(xintercept=c(-log2fc, log2fc), col="grey50", linetype='dotted') +
+    geom_hline(yintercept=-log10(pval), col="grey50", linetype='dotted') +
+    theme_bw() +
+    #theme(text=element_text(size=13), legend.position = 'none') +
+    xlab("log2 Fold Change") +
+    ylab("-log10 Adjusted p-value") +
+    theme(text = element_text(size = 15),
+          axis.line = element_line(size = 0.5),
+          panel.border = element_blank(),
+          panel.grid = element_blank()) +
+    notebook_theme +
+    ggtitle(name) 
+
+    
+    if(!is.null(labeled_genes)){
+        p <- p + geom_label_repel(data = df %>% filter(SYM %in% labeled_genes),
+                                 fill = "white",
+                                 show.legend = F, box.padding = 0.5, 
+                                 max.overlaps = Inf, color = "black") +
+            labs(title = "min.segment.length = 0") +
+            notebook_theme +
+            ggtitle(name)
+    }
+  
+  return(ggrastr::rasterise(p))
+}
+
+notebook_theme <- theme(aspect.ratio = 1,
+                       text = element_text(size = 15), 
+                       panel.border = element_rect(colour = "grey85", fill=NA, size=1),
+                       axis.ticks = element_line(colour = "grey85"),
+                       panel.grid.major = element_blank(), 
+                       panel.grid.minor = element_blank(),
+                       panel.background = element_blank(),
+                       axis.line = element_blank(), 
+                       legend.position = "none",
+                       strip.background = element_blank())
+
+volcano_gene_set_label <- function(df, log2fc = 1, pval=0.05, bm = 100, genes, name = '', labeled_genes = NULL){
+  
+  df <- df %>% 
+    filter(baseMean > bm)
+  
+  p <- df %>%
+    mutate(col = ifelse(SYM %in% genes, 'y', NA)) %>%
+    arrange(!is.na(col), col) %>% 
+    ggplot(aes(x=-log2FoldChange, y=-log10(padj), col=col, label = SYM)) +
+    geom_point(size=2, alpha=0.7) +
+    scale_color_manual(values=c(y = "red"), 
+                       na.value = "grey40") +
+    theme_bw() +
+    xlab("log2 Fold Change") +
+    ylab("-log10 Adjusted p-value") +
+    notebook_theme +
+    theme(aspect.ratio = 1/0.75) +
+    ggtitle(name) 
+
+    
+    if(!is.null(labeled_genes)){
+        p <- p + geom_text_repel(data = df %>% filter(SYM %in% labeled_genes),
+                                 min.segment.length = 0, box.padding = 0.5,
+                                 max.overlaps = Inf, color = "black") +
+            notebook_theme +
+            theme(aspect.ratio = 1/0.75) +
+            ggtitle(name)
+    }
+  
+  return(ggrastr::rasterise(p))
+}
+
+
+
+```
+
+</details>
+
+Get the required data from DESeq2 results to produce volcano plots:
+
+```{r volcano-nb-foxr2-sig}
+
+# Get DESeq results for comparisons including NB-FOXR2
+sigs_path_comparators <- here("data/RNAseq/pipeline_l3/2024-04-human_comparator_tumor_signatures_rem_low_purity_DIPG/diff/Ensembl.ensGene.exon")
+comparisons <- list.files(sigs_path_comparators) %>% 
+    .[!grepl(x = ., pattern = ".QC")] %>% 
+    sub(pattern = ".tsv", replacement = "")
+nbfoxr2_comparisons <- comparisons[grepl(comparisons, pattern = "NB-FOXR2")] %>% 
+    .[!grepl(., pattern = "HGG-IDH")]
+
+deseq_dfs_nb_foxr2 <- map(nbfoxr2_comparisons,
+                          ~ data.table::fread(glue("{sigs_path_comparators}/{.x}.tsv")) %>% 
+                            tidyr::separate(col = "ID", into = c("ENS", "SYM"), sep = ":"))
+names(deseq_dfs_nb_foxr2) <- nbfoxr2_comparisons
+
+# Get the genes in the NB-FOXR2 signature
+sym_nb_foxr2 <- map_chr(str_split(consensus_all_DE_comparators_hg_100[["NB-FOXR2"]], ":"),2)
+
+```
+
+### Interactive volcano
+
+Plot an interactive (plotly) version of volcano plot to easily check genes
+appearing in the comparison.
+
+```{r volcano-interactive}
+
+volcano_gene_set(deseq_dfs_nb_foxr2[[1]],
+                 genes = sym_nb_foxr2,
+                 name = names(deseq_dfs_nb_foxr2)[1]) %>% ggplotly()
+
+volcano_gene_set(deseq_dfs_nb_foxr2[[2]],
+                 genes = sym_nb_foxr2,
+                 name = names(deseq_dfs_nb_foxr2)[2]) %>% ggplotly()
+
+volcano_gene_set(deseq_dfs_nb_foxr2[[3]],
+                 genes = sym_nb_foxr2,
+                 name = names(deseq_dfs_nb_foxr2)[3]) %>% ggplotly()
+
+```
+
+
+### Labelled volcano
+
+Label specific genes in each volcano for publication:
+
+```{r volcano-labeled}
+
+volcano_gene_set_label(deseq_dfs_nb_foxr2[["NB-FOXR2vsDIPG-H3K27M"]],
+                 genes = sym_nb_foxr2,
+                 name = "NB-FOXR2vsDIPG-H3K27M",
+                 labeled_genes = c("NKX2-1", "LHX6", "FOXG1",
+                                   "GFAP", "AQP4", "MBP", "MOG"))
+
+
+volcano_gene_set_label(deseq_dfs_nb_foxr2[["NB-FOXR2vsETMR"]],
+                 genes = sym_nb_foxr2,
+                 name = "NB-FOXR2vsETMR",
+                 labeled_genes = c("GPD1", "FAM163A", "FERMT1",
+                                   "LIN28A"))
+
+
+volcano_gene_set_label(deseq_dfs_nb_foxr2[["NB-FOXR2vsMB-WNT"]],
+                 genes = sym_nb_foxr2,
+                 name = "NB-FOXR2vsMB-WNT",
+                 labeled_genes = c("NKX2-1", "ETS1", "FAM163A", "DNM3",
+                                   "ZIC5", "NKD1", "ZIC1", "ZIC3"))
+
+
+```
+
+## Signature QC: ssGSEA in human tumors
+
+Here, we test the quality of the generated consensus signatures by scoring them
+in human tumors, both bulk and single-cell.
+
+### Bulk
+
+1. Load NB-FOXR2 bulk tumor counts matrices (raw) for the full tumor cohort.
+
+2. Subset the tumor cohort into their individual tumor types (and split NB-FOXR2 
+into Korshunov and non-Korshunov/in-house).
+
+```{r load-bulk}
+
+# Load bulk metadata
+meta <- read_tsv(here("output/00/metadata_patients_NGS.tsv"))
+meta_bulk <- meta %>% filter(RNAseq == "Y")
+
+# Get sample names for each tumor type
+# Alter the names with gsub to match the sample names found in counts matrix column names 
+# (done manually by comparing the sample names)
+
+NBFOXR2_bulk_sample_names_Korshunov <- meta_bulk %>% 
+    filter(Group == "NB-FOXR2") %>% 
+    filter(grepl(x = .$Source, pattern = "Korshunov")) %>% 
+    .$ID %>% 
+    gsub(pattern = "^", replacement = "X") %>% 
+    gsub(pattern = "$", replacement = ".0")
+
+NBFOXR2_bulk_sample_names_noKorshunov <- meta_bulk %>% 
+    filter(Group == "NB-FOXR2") %>% 
+    filter(!grepl(x = .$Source, pattern = "Korshunov")) %>% 
+    .$ID %>% 
+    gsub(pattern = "P-", replacement = "P.") %>% 
+    gsub(pattern = "S-", replacement = "S.") %>% 
+    gsub(pattern = "-S", replacement = "_S") %>% 
+    gsub(pattern = "-P", replacement = "_P")  %>% 
+    gsub(pattern = "MDT-AP", replacement = "MDT.AP") %>% 
+    gsub(pattern = "15-", replacement = "15.")
+
+MBWNT_bulk_sample_names <- meta_bulk %>% 
+    filter(Group == "MB-WNT") %>% 
+    .$ID %>% 
+    gsub(pattern = "P-", replacement = "P.") %>% 
+    gsub(pattern = "S-", replacement = "S.") %>% 
+    gsub(pattern = "-S", replacement = "_S") %>% 
+    gsub(pattern = "-P", replacement = "_P")  %>% 
+    gsub(pattern = "MDT-AP", replacement = "MDT.AP") %>% 
+    gsub(pattern = "15-", replacement = "15.")
+
+ETMR_bulk_sample_names <- meta_bulk %>% 
+    filter(Group == "ETMR") %>% 
+    .$ID %>% 
+    gsub(pattern = "P-", replacement = "P.") %>% 
+    gsub(pattern = "S-", replacement = "S.") %>% 
+    gsub(pattern = "-S", replacement = "_S") %>% 
+    gsub(pattern = "-P", replacement = "_P")  %>% 
+    gsub(pattern = "MDT-AP", replacement = "MDT.AP") %>% 
+    gsub(pattern = "15-", replacement = "15.")
+
+DIPG_bulk_sample_names <- meta_bulk %>% 
+    filter(Group == "DIPG-H3K27M") %>% 
+    .$ID %>% 
+    gsub(pattern = "P-", replacement = "P.") %>% 
+    gsub(pattern = "S-", replacement = "S.") %>% 
+    gsub(pattern = "-S", replacement = "_S") %>% 
+    gsub(pattern = "-P", replacement = "_P")  %>% 
+    gsub(pattern = "MDT-AP", replacement = "MDT.AP") %>% 
+    gsub(pattern = "15-", replacement = "15.") %>% 
+    gsub(pattern = "00-", replacement = "X00.")
+
+sample_names <- list("NBFOXR2_bulk_sample_names_noKorshunov" = NBFOXR2_bulk_sample_names_noKorshunov,
+                    "NBFOXR2_bulk_sample_names_Korshunov" = NBFOXR2_bulk_sample_names_Korshunov,
+                    "MBWNT_bulk_sample_names" = MBWNT_bulk_sample_names,
+                    "ETMR_bulk_sample_names" = ETMR_bulk_sample_names,
+                    "DIPG_bulk_sample_names" = DIPG_bulk_sample_names)
+
+# Load bulk counts matrix and subset based on sample name lists set up above
+counts_all_tumors <- read.table("/project/kleinman/steven.hebert/from_narval/2024/2023-05-16-FOXR2paper/2024-01-29-revision/2024-01-31-PCA-pipelineGenes/level3/hg19/all_human_tumors_v0/counts/Ensembl.ensGene.exon.norm.tsv.gz", sep = "\t", row.names = 1, header = T) %>% as.matrix()
+
+counts_dfs <- map(sample_names,
+                 ~ counts_all_tumors %>% 
+                     as.data.frame() %>% 
+                    select(all_of(.x)) %>% 
+                    as.matrix())
+
+names(counts_dfs) <- c("NB-FOXR2 in-house",
+                      "NB-FOXR2 Korshunov",
+                      "MB-WNT",
+                      "ETMR",
+                      "DIPG")
+
+save(counts_dfs, file = glue("{out}/counts_dfs.Rda"))
+
+```
+
+Run GSVA in each of the bulk tumor counts matrices.
+
+```{r run-gsva-bulk, message = FALSE, warning = FALSE, results = FALSE}
+
+sigs_list_ens_sym_hg <- consensus_all_DE_comparators_hg_100
+save(sigs_list_ens_sym_hg, file = glue("{out}/sigs_list_ens_sym_hg.Rda"))
+
+ssGSEA_scores_bulk <- map(counts_dfs,
+                          ~ GSVA::gsva(.x,
+                                    sigs_list_ens_sym_hg,
+                                    method="ssgsea",
+                                    ssgsea.norm = F,
+                                    tau = 0.25))
+names(ssGSEA_scores_bulk) <- names(counts_dfs)
+
+save(ssGSEA_scores_bulk, file = glue("{out}/ssGSEA_scores_bulk.Rda"))
+
+```
+
+Plot scores in the bulk samples of each tumor type.
+
+```{r gsva-plot-bulk-per-tumor, fig.width = 20, fig.height=12, cache = F}
+
+load(file = glue("{out}/ssGSEA_scores_bulk.Rda"))
+
+plot_scores_across_signatures <- function(ssGSEA_score_df,
+                                          tumor_type){
+    
+    ssGSEA_score_df %>% t() %>% 
+          as.data.frame() %>%
+          rownames_to_column(var = "sample") %>%
+          pivot_longer(cols = -sample, 
+                       values_to = "ssGSEAscore",
+                       names_to = "signature") %>%
+            ggplot(aes(x = factor(signature),
+                        y = ssGSEAscore,
+                        fill = signature)) +
+                geom_violin() +
+                geom_boxplot(width=0.1, fill = "white") +
+                scale_fill_manual(values = palette_groups) +
+                theme_classic() +
+                ggtitle(glue("{tumor_type}: scores per signature")) +
+                xlab("Signature") +
+                theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+                        plot.title = element_text(hjust = 0.5, size = 20)) + 
+                no_legend()
+    
+}
+
+imap(ssGSEA_scores_bulk,
+      ~ plot_scores_across_signatures(ssGSEA_score_df = .x,
+                                      tumor_type = .y)) %>% 
+    cowplot::plot_grid(plotlist = ., ncol = 3)
+
+
+```
+
+
+### Single-cell NB-FOXR2
+
+Define ssGSEA calculation & plotting functions:
+
+<details>
+
+```{r sc-gsea-functions}
+
+run_gsea <- function(seurat, alias,
+                       genelist, genelist_name){
+    
+    # Note: bin_by is merely used to split the ssGSEA calculation for computational tractability
+    # Predictions are later merged together
+    # Selection of variable does not matter to result 
+
+    genelist_intersect <- map(genelist,
+                              ~ intersect(rownames(seurat),.x))
+    
+    message(glue("The following genes were not found in seurat object {alias}"))
+    map(genelist,
+        ~ setdiff(.x, rownames(seurat))) %>% print()
+    
+    bin_ssgsea(seurat,
+               bin_by = "seurat_clusters",
+               summary_type = "single_cells",
+               out_prefix = glue("{out}/{alias}_{genelist_name}"), 
+               genelist = genelist,
+               save_leading_edge = F)
+    
+}
+
+
+get_scores <- function(seurat, 
+                       alias,
+                       metadata = NULL,
+                       genelist_name) {
+    
+    scores <- data.table::fread(glue("{out}/{alias}_{genelist_name}.single_cells.ssgsea_scores.txt", 
+                                     data.table = FALSE)) %>%
+                column_to_rownames(var = "Signature") %>% 
+                t() %>% 
+                as.data.frame() %>% 
+                rownames_to_column("Cell")
+    
+    if(!is.null(metadata)){
+        scores <- scores %>% left_join(., metadata[[alias]])
+    }
+    
+    return(scores)
+    
+}
+
+plot_dist_score <- function(scores,
+                            alias,
+                            comparators,
+                            palette) {
+
+    scores %>%
+        filter(inferCNV_call == "Tumor") %>%
+        pivot_longer(cols = comparators,
+                     names_to = "Signature",
+                     values_to = "ssGSEA_score") %>%
+        ggplot(aes(x = ssGSEA_score, fill = Signature)) +
+        geom_density(alpha = 0.7) +
+        ggtitle(alias) +
+        scale_fill_manual(values = palette)
+}
+
+plot_dist_score_hg <- function(scores,
+                            alias,
+                            comparators,
+                            palette,
+                            mal_only = T,
+                            mal_cell_ids = NULL) {
+    
+        if(mal_only) {
+            if(is.null(mal_cell_ids)) {
+                
+                scores <- scores %>% 
+                    filter(Malignant_normal == "Malignant")
+                
+            } else {
+                 
+                scores <- scores %>% 
+                    filter(Cell %in% mal_cell_ids)
+            }
+        }
+    
+    scores %>% 
+        pivot_longer(cols = comparators, 
+                     names_to = "Signature", 
+                     values_to = "ssGSEA_score") %>% 
+        ggplot(aes(x = ssGSEA_score, fill = Signature)) +
+        geom_density(alpha = 0.7) +
+        ggtitle(alias) +
+        scale_fill_manual(values = palette)
+}
+
+plot_dist_score_ridge <- function(scores,
+                            alias,
+                            comparators,
+                            palette,
+                            y_split_var,
+                            color_var,
+                            scale = 0.9) {
+
+    scores %>%
+        filter(Malignant_status == "Tumor") %>%
+        pivot_longer(cols = comparators,
+                     names_to = "Signature",
+                     values_to = "ssGSEA_score") %>%
+        ggplot(aes(x = ssGSEA_score,
+                   y = .data[[y_split_var]],
+                   fill = .data[[color_var]])) +
+        geom_density_ridges(alpha = 0.7,
+                            scale = scale) +
+        ggtitle(alias) +
+        scale_fill_manual(values = palette)
+}
+
+
+plot_dist_score_ridge_hg <- function(scores,
+                            alias,
+                            comparators,
+                            palette,
+                            y_split_var,
+                            color_var, 
+                            scale = 0.9,
+                            mal_only = T,
+                            mal_cell_ids = NULL) {
+    
+        if(mal_only) {
+            if(is.null(mal_cell_ids)) {
+                
+                scores <- scores %>% 
+                    filter(Malignant_normal == "Malignant")
+                
+            } else {
+                 
+                scores <- scores %>% 
+                    filter(Cell %in% mal_cell_ids)
+            }
+        }
+
+    
+        scores %>% 
+            pivot_longer(cols = comparators, 
+                     names_to = "Signature", 
+                     values_to = "ssGSEA_score") %>% 
+            ggplot(aes(x = ssGSEA_score, 
+                       y = .data[[y_split_var]], 
+                       fill = .data[[color_var]])) +
+            geom_density_ridges(alpha = 0.7,
+                                scale = scale) +
+            ggtitle(alias) +
+            scale_fill_manual(values = palette)
+}
+
+
+```
+
+</details>
+
+Load single-cell tumor metadata and Seurat objects.
+
+```{r get-meta-objects, message = F, warning = F, cache = F}
+
+meta_sc <- read_tsv(here("output/00/metadata_patients_sc.tsv"))
+sc_samples_nb_foxr2 <- meta_sc %>% filter(Group == "NB-FOXR2") %>% pull(ID)
+
+# Function to load an RData file and return it
+loadRData <- function(fileName){
+  
+  load(fileName)
+  get(ls()[ls() != "fileName"])
+  
+}
+
+# Load per-sample seurat objects
+samples_sc <- map(sc_samples_nb_foxr2, ~ loadRData(meta_sc[meta_sc$ID == .x, ]$Path))
+names(samples_sc) <- sc_samples_nb_foxr2
+
+# Load merged object metadata
+load(here("output/04/merged_sc_meta.Rda"))
+
+# correct a discrepancy in how barcodes are named for the multiome sample
+samples_sc$`P-6778_S-10155`@meta.data$cell.barcode <- samples_sc$`P-6778_S-10155`@meta.data$gex_barcode
+merged_sc_meta <- merged_sc_meta %>%
+    mutate(cell.barcode = ifelse(is.na(cell.barcode), gex_barcode, cell.barcode))
+
+# Load samples
+samples_sc <- map(samples_sc, function(seurat) {
+    
+    # sanity check that cell order is preserved in each metadata slot
+    merged_barcodes <- merged_sc_meta %>% filter(cell.barcode %in% seurat@meta.data$cell.barcode) %>% pull(cell.barcode)
+    all(seurat@meta.data$cell.barcode == merged_barcodes)
+    
+    return(seurat)
+    
+})
+
+# Add in FOXR2 tumor metadata computed in previous R markdown
+load(here("output/06.2/seurat_tumor_metadata.Rda"))
+samples_sc <- map2(samples_sc, seurat_tumor_metadata,
+                     function(seurat, meta) {
+                         seurat@meta.data <- meta %>% 
+                             column_to_rownames("Cell")
+                         return(seurat)
+                     })
+
+```
+
+Run ssGSEA scoring.
+
+```{r run_ssgsea_hg, cache = F}
+
+# #Run ssGSEA
+# purrr::imap(samples_sc,
+#           ~ run_gsea(seurat = .x,
+#                        alias = .y,
+#                        genelist = sigs_list_ssgsea_hg,
+#                        genelist_name = "tumor_sigs_comparator_consensus"))
+
+```
+
+```{r get_scores_hg, cache = F}
+
+scores_hg <- purrr::imap(samples_sc, 
+            ~ get_scores(seurat = .x,
+                         alias = .y,
+                         metadata = seurat_tumor_metadata,
+                         genelist_name = "tumor_sigs_comparator_consensus"))
+names(scores_hg) <- names(samples_sc)
+
+```
+
+Plot the distribution of scores in malignant cells.
+
+```{r plot_ssgsea_enrichment_hg, fig.height=10, fig.width=30, cache = F}
+
+purrr::imap(scores_hg,
+            ~ plot_dist_score_hg(scores = .x,
+                              alias = .y,
+                              comparators = names(sigs_list_ssgsea_hg),
+                              palette = palette_groups)) %>% 
+    plot_grid(plotlist = .,
+              align = "h",
+              ncol = 3)
+
+```
+
+
+## Signature QC: heatmap
+
+To summarize our validation efforts, here we generate a Z-scored heatmap of 
+signature gene expression across bulk human pediatric brain tumors.
+
+```{r load-hg-for-heatmap}
+
+# Load genes
+
+load(glue("{out}/sigs_list_ssgsea_mm.Rda"))
+
+sig_genes <- sigs_list_ssgsea[["NB-FOXR2"]]
+etmr_genes <- sigs_list_ssgsea[["ETMR"]]
+dipg_genes <- sigs_list_ssgsea[["DIPG-H3K27M"]]
+wnt_mb_genes <- sigs_list_ssgsea[["MB-WNT"]]
+
+gene_split <- data.frame("Gene" = c(sig_genes, etmr_genes, wnt_mb_genes, dipg_genes),
+                        "Group" = c(rep("NB-FOXR2", length(sig_genes)),
+                                    rep("ETMR", length(etmr_genes)),
+                                    rep("MB-WNT", length(wnt_mb_genes)),
+                                    rep("DIPG", length(dipg_genes)))
+                        )
+
+# Convert gene symbols mouse to human using cached biomaRt reference
+load(here("data/singlecell/references_genome/biomaRt_mm_to_hg_lds.Rda"))
+gene_split_hg <- genes_lds %>% filter(MGI.symbol %in% gene_split$Gene) %>% 
+    rename(Gene = MGI.symbol) %>% 
+    rename(Gene_hg = HGNC.symbol) %>% 
+    left_join(gene_split, .) %>% 
+    select(-Gene)
+
+meta <- read_tsv(here("output/00/metadata_patients_NGS.tsv"))
+meta_bulk <- meta %>% filter(RNAseq == "Y")
+
+korshunov <- meta_bulk %>% 
+    filter(Group == "NB-FOXR2") %>% 
+    filter(grepl(x = .$Source, pattern = "Korshunov")) %>% 
+    .$ID %>%
+    gsub(pattern = "$", replacement = ".0")
+
+in_house <- meta_bulk %>% 
+    filter(Group == "NB-FOXR2") %>% 
+    filter(!grepl(x = .$Source, pattern = "Korshunov")) %>% 
+    .$ID 
+
+MBWNT_bulk_sample_names <- meta_bulk %>% 
+    filter(Group == "MB-WNT") %>% 
+    .$ID
+
+ETMR_bulk_sample_names <- meta_bulk %>% 
+    filter(Group == "ETMR") %>% 
+    .$ID
+
+DIPG_bulk_sample_names <- meta_bulk %>% 
+    filter(Group == "DIPG-H3K27M") %>% 
+    .$ID 
+
+hg_nbfoxr2 <- extract_pipeline_counts(path = here("data/RNAseq/pipeline_l3/2023-05-test_pbt/counts/Ensembl.ensGene.exon.norm.tsv.gz"),
+                                        goi = gene_split_hg$Gene_hg)  %>% 
+    filter(sample %in% c(korshunov,
+                         in_house,
+                         MBWNT_bulk_sample_names,
+                         ETMR_bulk_sample_names,
+                         DIPG_bulk_sample_names))
+
+hg_nbfoxr2 <- hg_nbfoxr2 %>% 
+    mutate(Group = case_when(sample %in% korshunov ~ "NB-FOXR2 In-house",
+                             sample %in% in_house ~ "NB-FOXR2 Korshunov",
+                             sample %in% MBWNT_bulk_sample_names ~ "MB-WNT",
+                             sample %in% ETMR_bulk_sample_names ~ "ETMR",
+                             sample %in% DIPG_bulk_sample_names ~ "DIPG"))
+
+# Subset gene_split_hg to the genes which were retrieved by extract_pipeline_counts
+gene_split_hg <- gene_split_hg %>% 
+    filter(Gene_hg %in% (hg_nbfoxr2$gene_symbol %>% unique))
+
+```
+
+Produce normalized counts matrix
+
+```{r norm-counts-hg, fig.height=13, fig.width=12}
+
+# For genes with multiple ensembl IDs for a given symbol, select the symbol with
+# highest gene_expression. If two have the same gene_expression, select randomly
+mat <- hg_nbfoxr2 %>%
+    group_by(gene_symbol, sample) %>% 
+    slice_max(order_by = gene_expression, with_ties = F) %>% 
+    select(gene_symbol, sample, gene_expression) %>%
+    pivot_wider(names_from = sample, values_from = gene_expression) %>%
+    tibble::column_to_rownames("gene_symbol") %>%
+    as.matrix
+
+sample_split <- hg_nbfoxr2 %>%
+    select(sample, Group) %>%
+    distinct()
+
+```
+
+Scale each row (gene) by Z score, group together NB-FOXR2 from in-house and 
+Korshunov datasets, and annotate genes of interest on the right side. 
+
+```{r heatmap-hg-scaled-row-zscore-groupnbfoxr2-annogenes, fig.height=13, fig.width=12}
+
+mat_row_zscore <- apply(mat, 1,
+                        scale) %>% t()
+colnames(mat_row_zscore) <- colnames(mat)
+
+sample_split_groupnbfoxr2 <- sample_split %>% 
+    mutate(Group = case_when(Group == "NB-FOXR2 In-house" ~ "NB-FOXR2",
+                             Group == "NB-FOXR2 Korshunov" ~ "NB-FOXR2",
+                             TRUE ~ as.character(Group)))
+
+m <- mat_row_zscore[gene_split_hg$Gene_hg,]
+
+highlight <- c("NKX2-1", "FOXR2", "FOXG1", "LHX6", "ETS1", "DLX5", "NXPH1", "GPD1", "FAM163A", "DNM3", "FERMT1", 
+               "LIN28A", "LIN28B", "HES5", "BEND3",
+               "NKD1", "TBR1", "DKK2", "DKK4", "ZIC1", "ZIC3", "ZIC5",
+               "MBP", "MOBP", "BCAS1", "MOG", "AQP4", "GFAP", "ALDH1L1")
+
+ha <- rowAnnotation(an = anno_mark(at = which(rownames(m) %in% highlight),
+                                   labels = rownames(m)[rownames(m) %in% highlight]))
+
+Heatmap(m, use_raster = TRUE, raster_quality = 5,
+        right_annotation = ha,
+        cluster_rows = F, cluster_columns = F,
+        col = circlize::colorRamp2(colors = c("royalblue3", "antiquewhite", "red2"),
+                                  breaks = c(-3, 0, 3)),
+        row_split = factor(gene_split_hg$Group, levels = c("NB-FOXR2", "ETMR", "MB-WNT", "DIPG")),
+        column_split = factor(sample_split_groupnbfoxr2$Group, levels = c("NB-FOXR2",
+                                                             "ETMR", "MB-WNT", "DIPG")),
+        row_gap = unit(3, "mm"), column_gap = unit(3, "mm"),
+        show_row_names = FALSE)
+
+```
+
+## ssGSEA in mouse models
+
+Here, we finally use the generated and quality-checked consensus tumor-specific
+signatures to score cells in single-cell profiles of our mouse models.
+
+### Single-cell
+
+Run ssGSEA with signatures.
+
+```{r run_ssgsea, eval = FALSE}
+
+# Run ssGSEA
+purrr::imap(seurat_mouse,
+           ~ run_gsea(seurat = .x,
+                        alias = .y,
+                        genelist = sigs_list_ssgsea,
+                        genelist_name = "tumor_sigs_comparator_consensus"))
+
+```
+
+Retrieve scores saved in output.
+
+```{r get_scores}
+
+scores <- purrr::imap(seurat_mouse,
+            ~ get_scores(seurat = .x,
+                         alias = .y,
+                         metadata = seurat_mouse_metadata,
+                         genelist_name = "tumor_sigs_comparator_consensus"))
+names(scores) <- names(seurat_mouse)
+
+```
+
+Ridge plot split by projected cell type of each single cell in mouse samples 
+(Glia, Neurons).
+
+```{r plot_ssgsea_enrichment_celltype, fig.height = 7, fig.width=30, cache = F}
+
+# Fix palette names so it matches the group variables in scores object
+names(palette_groups)[which(names(palette_groups) == "HGG-H3.3G34R/V")] <- "HGG-H3.3G34R.V"
+
+purrr::imap(scores,
+            ~ plot_dist_score_ridge(scores = .x %>% filter(broad_label %in% c("Neuron", "Glia")),
+                              alias = .y,
+                              comparators = names(sigs_list_ssgsea),
+                              palette = palette_groups,
+                              y_split_var = "broad_label",
+                              color_var = "Signature",
+                              scale = 0.6))  %>%
+    plot_grid(plotlist = .,
+              align = "h",
+              ncol = 3)
+
+```
+
+In the publication, we separate the rows for neurons (main figures) and glia 
+(supplementary figures) as follows:
+
+```{r plot_ssgsea_enrichment_celltype_neurons, fig.height = 4, fig.width=30, cache = F}
+
+purrr::imap(scores,
+            ~ plot_dist_score_ridge(scores = .x %>% filter(broad_label %in% c("Neuron")),
+                              alias = .y,
+                              comparators = names(sigs_list_ssgsea),
+                              palette = palette_groups,
+                              y_split_var = "broad_label",
+                              color_var = "Signature",
+                              scale = 0.6))  %>%
+    plot_grid(plotlist = .,
+              align = "h",
+              ncol = 3)
+
+```
+
+```{r plot_ssgsea_enrichment_celltype_glia, fig.height = 4, fig.width=30, cache = F}
+
+purrr::imap(scores,
+            ~ plot_dist_score_ridge(scores = .x %>% filter(broad_label %in% c("Glia")),
+                              alias = .y,
+                              comparators = names(sigs_list_ssgsea),
+                              palette = palette_groups,
+                              y_split_var = "broad_label",
+                              color_var = "Signature",
+                              scale = 0.6))  %>%
+    plot_grid(plotlist = .,
+              align = "h",
+              ncol = 3)
+
+```
+
+
+### Joint UMAP of ssGSEA score in malignant neurons
+
+Load joint object.
+
+```{r load-joint}
+
+load(here("data/singlecell/integrations/mouse_naive_join/output/seurat_joint.Rda"))
+seurat_joint$Joint_cluster <- Idents(seurat_joint)
+
+# For now, we will not use the ATAC, so let's make a "light" version of the object
+seurat_joint[['ATAC']] <- NULL
+seurat_joint[['peaks']] <- NULL
+seurat_joint[['promoters']] <- NULL
+
+# Sanity check: # cells in joint sample = total across individual samples
+map(seurat_mouse, ncol) %>% unname() %>% as.numeric() %>% sum() == ncol(seurat_joint)
+
+load(here("output/07.1/seurat_mouse_metadata_joint.Rda"))
+seurat_joint@meta.data <- seurat_mouse_metadata_joint %>%
+                             column_to_rownames("Cell")
+
+
+```
+
+Add scores to joint object metadata and save.
+
+```{r add-scores-meta-joint}
+
+joint_scores <- imap(scores,
+    function(df, sample_name) {
+        df %>% 
+            dplyr::rename("ssGSEA_NBFOXR2" = "NB-FOXR2") %>% 
+            dplyr::rename("ssGSEA_ETMR" = "ETMR") %>%
+            dplyr::rename("ssGSEA_DIPG" = "DIPG-H3K27M") %>%
+            dplyr::rename("ssGSEA_MB_WNT" = "MB-WNT") %>%
+            mutate("Sample" = sample_name) %>% 
+            select("gex_barcode", "ssGSEA_NBFOXR2", "ssGSEA_ETMR", "ssGSEA_DIPG", "ssGSEA_MB_WNT", "Sample", "orig.ident")
+    }) %>% Reduce(rbind, .) %>% 
+    left_join(by = c("gex_barcode", "Sample"), seurat_joint@meta.data) %>% 
+    select(ssGSEA_NBFOXR2, ssGSEA_ETMR, ssGSEA_DIPG, ssGSEA_MB_WNT) 
+
+rownames(joint_scores) <- rownames(seurat_joint@meta.data)
+
+seurat_joint <- AddMetaData(seurat_joint, joint_scores)
+
+save(joint_scores, file = glue("{out}/joint_mouse_ssGSEA_scores_meta.Rda"))
+
+```
+
+Save joint object with no Non-consensus cells or doublets for plotting
+
+```{r save-joint-obj-plot}
+
+seurat_joint <- subset(seurat_joint, subset = broad_label != "No consensus" & !is.na(broad_label))
+
+```
+
+Set same legend for each UMAP - check range of values for each signature score
+
+```{r set-range-legend}
+
+range(seurat_joint$ssGSEA_NBFOXR2)
+range(seurat_joint$ssGSEA_MB_WNT)
+range(seurat_joint$ssGSEA_ETMR)
+range(seurat_joint$ssGSEA_DIPG)
+
+```
+
+* Max value: 7802 from max(ssGSEA_DIPG)
+* Min value: -2236 from min(ssGSEA_MB_WNT)
+
+Setting legend to be between these two values for ssGSEA UMAP plots.
+
+For the publication figure, we will superimpose the neurons colored by 
+ssGSEA score over a grey UMAP showing all cells. We will produce each UMAP
+separately in ths R markdown and superimpose in Adobe Illustrator.
+
+Produce grey UMAP with malignant and normal cells together:
+
+```{r joint-umap-grey}
+
+p_grey <- DimPlot(seurat_joint, pt.size = 1,
+                  group.by = "is_cell",
+                  cols = "grey80") + square_theme + large_text
+
+ggrastr::rasterise(p_grey, dpi = 2000)
+
+```
+
+Extract UMAP plot axis ranges (to create the next plot in exact alignment).
+
+```{r extract-joint-umap-plot-axis-ranges}
+
+# x-range
+x_range <- layer_scales(p_grey)$x$range$range
+
+# y-range
+y_range <- layer_scales(p_grey)$y$range$range
+
+```
+
+Save joint object with malignant neurons only:
+
+```{r save-joint-obj-plot-mal-neur-only}
+
+seurat_joint_mal_neurons <- subset(seurat_joint, subset = broad_label == "Neuron")
+
+```
+
+Plot ssGSEA score in malignant neurons only:
+
+```{r umap-ssgsea-mouse-joint-mal-neur-only, fig.height=6, fig.width=7}
+
+## FOXR2 ssgsea
+
+print("Order points by score")
+p1 <- FeaturePlot(seurat_joint_mal_neurons, pt.size = 1, features = "ssGSEA_NBFOXR2", order = T) +
+  scale_color_gradientn(colors = c("darkblue", "white", "red"),
+                         limits = c(min(seurat_joint$ssGSEA_MB_WNT), max(seurat_joint$ssGSEA_DIPG))) + 
+    xlim(x_range) + ylim(y_range) +
+    square_theme + large_text
+
+ggrastr::rasterise(p1, dpi = 2000)
+
+## MB-WNT ssgsea
+
+print("Order points by score")
+p3 <- FeaturePlot(seurat_joint_mal_neurons, pt.size = 1, features = c("ssGSEA_MB_WNT"), order = T) +
+  scale_color_gradientn(colors = c("darkblue", "white", "red"),
+                         limits = c(min(seurat_joint$ssGSEA_MB_WNT), max(seurat_joint$ssGSEA_DIPG))) + 
+    xlim(x_range) + ylim(y_range) +
+    square_theme + large_text
+
+ggrastr::rasterise(p3, dpi = 2000)
+
+## ETMR ssgsea
+
+print("Order points by score")
+p5 <- FeaturePlot(seurat_joint_mal_neurons, pt.size = 1, features = c("ssGSEA_ETMR"), order = T) +
+  scale_color_gradientn(colors = c("darkblue", "white", "red"),
+                         limits = c(min(seurat_joint$ssGSEA_MB_WNT), max(seurat_joint$ssGSEA_DIPG))) + 
+    xlim(x_range) + ylim(y_range) +
+    square_theme + large_text
+
+ggrastr::rasterise(p5, dpi = 2000)
+
+## DIPG ssgsea
+
+print("Order points by score")
+p7 <- FeaturePlot(seurat_joint_mal_neurons, pt.size = 1, features = c("ssGSEA_DIPG"), order = T) +
+  scale_color_gradientn(colors = c("darkblue", "white", "red"),
+                         limits = c(min(seurat_joint$ssGSEA_MB_WNT), max(seurat_joint$ssGSEA_DIPG))) + 
+    xlim(x_range) + ylim(y_range) +
+    square_theme + large_text
+
+ggrastr::rasterise(p7, dpi = 2000)
+
+```
+
+
+<!-- END MATTER, insert reproducibility info -->
+
+```{r footer, echo = FALSE, results = 'asis', warning = FALSE, cache = FALSE}
+
+# Knit child document with header
+res <- knitr::knit_child(here("include", "footer.Rmd"), envir = environment(), quiet = TRUE)
+cat(res, sep = '\n')
+
+```
+
+<!-- END OF END MATTER -->

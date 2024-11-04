@@ -1,0 +1,740 @@
+---
+title: "04 - QC and data preparation for single-cell tumor data"
+author: "Selin Jessa [[selin.jessa@mail.mcgill.ca](mailto:selin.jessa@mail.mcgill.ca)] and Bhavyaa Chandarana [[bhavyaa.chandarana@mail.mcgill.ca](mailto:bhavyaa.chandarana@mail.mcgill.ca)]"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    keep_md: yes
+    code_folding: show
+    theme: flatly
+    css: ../include/style.css
+    toc: yes
+    toc_depth: 4
+    number_sections: true
+    df_print: paged
+    includes:
+      before_body: ../include/header.html
+      after_body:  ../include/footer.html
+---
+
+<!-- FRONT MATTER, insert configuration info -->
+
+```{r header, echo = FALSE, results = 'asis', warning = FALSE}
+
+# Index of the document
+# ...determines name of the subfolder of `outputs` and `figures`
+doc_id <- "04"
+
+suppressMessages(library(here))
+
+# Knit child document with header
+res <- knitr::knit_child(here("include", "header.Rmd"), envir = environment(), quiet = TRUE)
+cat(res, sep = '\n')
+
+```
+
+<!-- END OF FRONT MATTER -->
+
+
+# Overview
+
+Data for single-cell tumor samples (sc/snRNAseq, scMultiome) have been preprocessed
+using our in-house workflow based on Seurat/Signac, which loads Cellranger output,
+performs QC to filter cells, and applies normalization, dimensionality reduction,
+and clustering. These are run under `data/singlecell/pipeline_sc*` (except 
+`pipeline_scMultiome_mm` which is for processing of mouse samples).
+
+For each sample, inferCNV was also applied, to infer normal and malignant cells
+based on the single-cell data. This was run inside each sample's pipeline 
+directory under `data/singlecell/pipeline_sc*/<sample>/inferCNV`. Malignant and normal
+cells were called individually for each sample in the file `data/singlecell/pipeline_sc*/<sample>/inferCNV/window101_exp0.1_refG34normcleaned_HMMnone/infer_cnv_call.html`.
+
+Following the preprocessing, all samples were merged into one object and
+normalization/dimensionality reduction/clustering re-computed. This was performed
+at `data/singlecell/integrations`. No correction for batch/sample/technology differences
+were used.
+
+In this document, we load outputs from these preprocessing steps in the form
+of Seurat objects. We will perform post-cluster QC (removing any low quality clusters),
+explore the merged dataset, and assign normal and malignant cells based on both
+the inferCNV outputs, and the co-clustering of cells from different samples
+in the merged object.
+
+
+# Libraries
+
+```{r libs, warning = FALSE, message = FALSE, echo = TRUE, cache = FALSE}
+
+library(here)
+library(magrittr)
+library(tidyr)
+library(dplyr)
+library(readr)
+library(stringr)
+library(readxl)
+library(glue)
+library(purrr)
+library(ggplot2)
+library(cowplot)
+library(Seurat)
+library(Signac)
+
+source(here("include/style.R"))
+source(here("code/functions/scRNAseq.R"))
+source(here("code/functions/ssGSEA.R"))
+
+ggplot2::theme_set(theme_min())
+
+square_theme <- theme(aspect.ratio = 1)
+large_text <- theme(text = element_text(size = 15))
+
+
+```
+
+
+# Load metadata
+
+<div class="fold o">
+
+```{r read_meta_sc, cache = FALSE}
+
+meta_sc <- read_tsv(here("output/00/metadata_patients_sc.tsv"))
+
+```
+
+</div>
+
+```{r load-meta2, cache = FALSE}
+
+sc_samples_foxr2 <- meta_sc %>% filter(Group == "NB-FOXR2") %>% pull(ID)
+palette_sample <- read_tsv(here("output/00/sc_info.samples.tsv")) %>% 
+    select(Sample, Color) %>% tibble::deframe()
+
+```
+
+
+
+# Post-cluster QC {.tabset}
+
+Load the seurat objects, as produced by the preprocessing workflows.
+
+```{r load_seurat, cache = FALSE}
+
+samples_sc <- map(sc_samples_foxr2, ~ get(load(meta_sc[meta_sc$ID == .x, ]$Path)))
+names(samples_sc) <- sc_samples_foxr2
+
+```
+
+
+```{r qc_fn}
+
+# create a function to plot the violin plots for each QC stat
+plot_vln_stat_per_cluster <- function(stat, lims = c(0, NA), labels = FALSE, seurat) {
+    
+    # get the requested statistic
+    df <- seurat@meta.data
+    df$Stat <- df[[stat]]
+    
+    # ggplot violin plot
+    p1 <- df %>% ggplot(aes(x = seurat_clusters, y = Stat)) +
+        geom_violin(aes(fill = seurat_clusters), scale = "width") +
+        scale_fill_manual(values = seurat@misc$colours) +
+        rotate_x() + no_legend() +
+        # zoom in on y-axis if needed,
+        # without changing distribution
+        # and flip x/y axes
+        coord_flip(ylim = lims) +
+        xlab(NULL) +
+        ggtitle(stat)
+    
+    # remove sample labels if needed
+    # (after coord flip, samples are on the y-axis)
+    if (!labels) p1 <- p1 + theme(axis.text.y = element_blank()) + ylab(NULL)
+    
+    p1
+    
+}
+
+# wrapper function to plot all QC violin plots for one sample, given the seurat object
+plot_qc_per_sample <- function(seurat, nCount_max = 20000, nFeature_max = 7000) {
+    
+    stats <- replicate(5, c(0, NA), simplify = FALSE)
+    
+    names(stats) <- c("nCount_RNA",
+                      "nFeature_RNA",
+                      "percent.mito",
+                      "percent.ribo",
+                      "G2M.Score")
+    
+    stats$nCount_RNA <- c(0, nCount_max)
+    stats$nFeature_RNA <- c(0, nFeature_max)
+    stats$G2M.Score <- c(-0.5, 1.5)
+    
+    # map over:
+    # 1. stat
+    # 2. y limits
+    # 3. whether to keep labels or not
+    pmap(list(names(stats), stats, c(TRUE, rep(FALSE, 4))),
+         ~ plot_vln_stat_per_cluster(..1, ..2, ..3, seurat)) %>% 
+        {plot_grid(plotlist = ., nrow = 1, align = "h", axis = "tb",
+                   rel_widths = c(0.25, rep(0.18, 4)))}
+    
+}
+
+```
+
+Plot per-cluster QC in each sample (separated into tabs).
+
+## P-2236_S-2236
+
+```{r qc_P-2236_S-2236, fig.width = 12, fig.height = 6}
+
+plot_qc_per_sample(samples_sc$`P-2236_S-2236`)
+
+```
+
+In this sample, we flag cluster 7 as low-QC for downstream analysis.
+
+## P-2273_S-2273
+
+```{r qc_P-2273_S-2273, fig.width = 12, fig.height = 6}
+
+plot_qc_per_sample(samples_sc$`P-2273_S-2273`, nCount_max = 8000, nFeature_max = 5000)
+
+```
+
+## P-6776_S-10153
+
+```{r qc_P-6776_S-10153, fig.width = 12, fig.height = 3}
+
+plot_qc_per_sample(samples_sc$`P-6776_S-10153`)
+
+```
+
+## P-6777_S-10154
+
+```{r qc_P-6777_S-10154, fig.width = 12, fig.height = 4}
+
+plot_qc_per_sample(samples_sc$`P-6777_S-10154`)
+
+```
+
+## P-6778_S-10155
+
+```{r qc_P-6778_S-10155, fig.width = 12, fig.height = 3}
+
+plot_qc_per_sample(samples_sc$`P-6778_S-10155`, nCount_max = 25000, nFeature_max = 7000)
+
+```
+
+## NBFOXR2_6
+
+```{r qc_NBFOXR2_6, fig.width = 12, fig.height = 6}
+
+plot_qc_per_sample(samples_sc$`NBFOXR2_6`, nCount_max = 10000, nFeature_max = 4000)
+
+```
+
+# Naive-merged dataset
+
+## Load data
+
+Load integrated data (without batch correction or harmonization):
+
+```{r load_int, cache = FALSE}
+
+load(here("data/singlecell/integrations/NB-FOXR2_naive_join/output/seurat_joint.Rda"))
+seurat_joint$Joint_cluster <- Idents(seurat_joint)
+
+```
+
+## Overview
+
+Plot an overview of the merged dataset:
+
+```{r merged_umap_overview, fig.width = 15, fig.height = 4, cache = FALSE}
+
+seurat_joint@meta.data <- seurat_joint@meta.data %>% 
+    mutate(Technology = case_when(Sample == "NBFOXR2_6" ~ "10X Single Cell 3'",
+                                  TRUE ~ as.character(Technology)))
+
+plot_grid(
+    umap(seurat_joint, color_by = "Technology", alpha = 0.5, label = FALSE, point_size = 0.5) +
+        mod_legend_col() + square_theme + large_text,
+    umap(seurat_joint, color_by = "Sample", colors = palette_sample, alpha = 0.5, label = FALSE, point_size = 0.5) +
+        mod_legend_col() + square_theme + large_text,
+    umap(seurat_joint, legend = TRUE, alpha = 0.5, point_size = 0.5) +
+        mod_legend_col() + square_theme + large_text,
+    align = "h", axis = "tb", nrow = 1, rel_widths = c(0.35, 0.33, 0.30))
+
+```
+
+Produce separate rasterized plots for publication.
+
+<details>
+
+```{r technology_joint_umap, fig.width = 8, fig.height = 9}
+
+umap(seurat_joint, color_by = "Technology", alpha = 0.5, label = FALSE, point_size = 1,
+     rasterize = T) +
+    mod_legend_col() + 
+    theme(text=element_text(size=30),
+          legend.position = "bottom") +
+    square_theme
+
+```
+
+```{r sample_joint_umap, fig.width=8, fig.height=10}
+
+umap(seurat_joint, color_by = "Sample", colors = palette_sample, alpha = 0.95, label = FALSE, point_size = 1,
+     rasterize = T) +
+    mod_legend_col() + 
+    theme(text=element_text(size=31),
+          legend.position = "bottom") +
+    square_theme
+
+```
+
+```{r clusters_joint_umap, fig.width=8, fig.height=8}
+
+umap(seurat_joint, legend = TRUE, alpha = 0.5, point_size = 1,
+     rasterize = T) +
+    no_legend() +
+    theme(text=element_text(size=31)) +
+    square_theme
+
+```
+
+</details>
+
+## QC of merged data
+
+Plot QC metrics in the merged dataset.
+
+```{r merged_qc_vln_per_cluster, fig.width = 16, fig.height = 6}
+
+sc_meta <- seurat_joint@meta.data
+
+# harmonize column names for scRNA/Multiome preprocessing
+qc_rna <- sc_meta %>%
+    filter(Technology == "10X Single Nuclei 3'") %>%
+    select(Sample, Technology, nCount_RNA, nFeature_RNA, percent.mito, percent.ribo, G2M.Score, Harmony_cluster = seurat_clusters)
+
+qc_multi <- sc_meta %>%
+    filter(Technology == "10X Multiome") %>%
+    select(Sample, Technology, nCount_RNA, nFeature_RNA, percent.mito, percent.ribo, G2M.Score,
+           nCount_peaks, nFeature_peaks, atac_peak_region_fragments, nucleosome_signal, TSS.enrichment, Harmony_cluster = seurat_clusters)
+
+all_multi <- bind_rows(qc_rna, qc_multi) %>%
+    arrange(Technology) %>%
+    mutate(Sample = factor(Sample, levels = unique(.$Sample))) %>%
+    mutate(Harmony_cluster = factor(Harmony_cluster, levels = as.character(sort(as.numeric(levels(qc_multi$Harmony_cluster))))))
+
+
+# create a function to plot the violin plots for each QC stat
+plot_vln_stat_per_cluster <- function(stat, lims = c(0, NA), labels = FALSE) {
+
+    # get the requested statistic
+    df <- all_multi
+    df$Stat <- df[[stat]]
+
+    # ggplot violin plot
+    p1 <- df %>% ggplot(aes(x = Harmony_cluster, y = Stat)) +
+        geom_violin(aes(fill = Harmony_cluster), scale = "width") +
+        # scale_fill_manual(values = palette_sample) +
+        rotate_x() + no_legend() +
+        # zoom in on y-axis if needed,
+        # without changing distribution
+        # and flip x/y axes
+        coord_flip(ylim = lims) +
+        xlab(NULL) +
+        ggtitle(stat)
+
+    # remove sample labels if needed
+    # (after coord flip, samples are on the y-axis)
+    if (!labels) p1 <- p1 + theme(axis.text.y = element_blank()) + ylab(NULL)
+
+    p1 + large_text
+
+}
+
+stats <- replicate(5, c(0, NA), simplify = FALSE)
+
+names(stats) <- c("nCount_RNA",
+                  "nFeature_RNA",
+                  "percent.mito",
+                  "percent.ribo",
+                  "G2M.Score")
+
+stats$nCount_RNA <- c(0, 25000)
+stats$nFeature_RNA <- c(0, 7500)
+stats$G2M.Score <- c(-0.5, 1.5)
+
+# number of cells in each cluster
+p1 <- sc_meta %>%
+    ggplot(aes(x = seurat_clusters)) +
+    geom_bar(aes(fill = seurat_clusters)) +
+    coord_flip() +
+    no_legend() +
+    ggtitle("# cells") +
+    large_text
+
+p2 <- sc_meta %>%
+    ggplot(aes(x = seurat_clusters)) +
+    geom_bar(aes(fill = Sample), position = "fill") +
+    scale_fill_manual(values = palette_sample) +
+    theme(panel.border = element_blank()) +
+    rotate_x() +
+    ggtitle("Cluster breakdown by sample") +
+    coord_flip() +
+    no_legend() + 
+    large_text
+
+
+# map over:
+# 1. stat
+# 2. y limits
+# 3. whether to keep labels or not
+vln_plots <- pmap(list(names(stats[c("nCount_RNA", "nFeature_RNA", "percent.mito", "percent.ribo", "G2M.Score")]),
+                       stats[c("nCount_RNA", "nFeature_RNA", "percent.mito", "percent.ribo", "G2M.Score")],
+                       rep(FALSE, 5)), ~ plot_vln_stat_per_cluster(..1, ..2, ..3))
+
+plot_grid(plotlist = c(list(p1, p2), vln_plots),
+          nrow = 1, align = "h", axis = "tb", rel_widths = c(0.2, 0.2, rep(0.15, 5)))
+
+```
+
+
+```{r merged_umap_qc, fig.width = 10, fig.height = 8, cache = FALSE}
+
+plot_grid(
+    umap(seurat_joint, "nCount_RNA",   color_by_type = "continuous", colors = rdbu, alpha = 0.5, label = FALSE, point_size = 0.5) + square_theme + large_text,
+    umap(seurat_joint, "nFeature_RNA", color_by_type = "continuous", colors = rdbu, alpha = 0.5, label = FALSE, point_size = 0.5) + square_theme + large_text,
+    umap(seurat_joint, "percent.mito", color_by_type = "continuous", colors = rdbu, alpha = 0.5, label = FALSE, point_size = 0.5) + square_theme + large_text,
+    umap(seurat_joint, "percent.ribo", color_by_type = "continuous", colors = rdbu, alpha = 0.5, label = FALSE, point_size = 0.5) + square_theme + large_text,
+    align = "hv", axis = "rltb")
+
+```
+
+## Normal vs. malignant calling
+
+If a merged cluster contains >5% Normal cells called by inferCNV, we will label
+the whole cluster as Normal.
+
+```{r merged_malignant_normal, fig.width = 8, fig.height = 9}
+
+# get the proportion in each cluster assigned as normal or malignant
+prop_category <- prop.table(table(Idents(seurat_joint), seurat_joint$inferCNV), margin = 1)
+prop_category
+
+# if more than 5% of cells in one cluster are called Normal, call the cells
+# in the cluster which weren't as Normal
+seurat_joint$Malignant_normal <- map2_chr(
+    Idents(seurat_joint), seurat_joint$inferCNV,
+    function(cluster, infercnv) {
+
+        if      (infercnv == "Malignant" & prop_category[cluster, "Normal"] > 0.05) "Normal"
+        else infercnv
+
+    })
+
+table(seurat_joint$Malignant_normal)
+
+merged_sc_meta <- seurat_joint@meta.data
+save(merged_sc_meta, file = glue("{out}/merged_sc_meta.Rda"))
+
+```
+
+Plot the malignant vs. normal cell labels.
+
+```{r mal_norm_joint_umap, fig.width=8, fig.height=9}
+
+umap(seurat_joint,
+     color_by = "Malignant_normal",
+     colors = c("Normal" = "blue",
+                "Malignant" = "pink"),
+     rasterize = TRUE,
+     point_size = 1,
+     label = FALSE,
+     legend = T,
+     alpha = 0.5,
+     title = glue("Malignant/normal"),
+     hide_axes = T) +
+    mod_legend_col() +
+    theme(text=element_text(size=30),
+          legend.position = "bottom") + square_theme
+
+```
+
+
+```{r mal_norm_facet_joint_umap, fig.width=16, fig.height=8}
+
+map(c("Malignant", "Normal"),
+    function(i) {
+        
+        # https://github.com/satijalab/seurat/issues/3666#issuecomment-721307360
+        cells <- names(which(seurat_joint$Malignant_normal == i))
+       
+        umap(seurat_joint,
+             color_by = "Malignant_normal",
+             colors = "#000000",
+             cells = cells,
+             rasterize = TRUE,
+             point_size = 0.5,
+             # put cells not selected in grey
+             na_color = "grey80",
+             label = FALSE,
+             legend = FALSE,
+             title = glue("{i} - {length(cells)} cells"),
+             hide_axes = T) +
+            theme(text=element_text(size=30))
+
+    }) %>%
+    {cowplot::plot_grid(plotlist = ., nrow = 1)}
+
+```
+
+# Infer NBFOXR2_6 patient sex
+
+Metadata for patient sample `NBFOXR2_6` did not include patient sex.
+Here, we will infer the biological sex of this patient based on expression of 
+sex-specific genetic markers compared with the other five single-cell samples 
+which include patient sex in metadata:
+
+* `2236` - M
+* `2273` - F
+* `10153` - F
+* `10154` - M
+* `10155` - F
+
+We will plot the following sex specific genes across single-cell samples:
+
+* XIST (X chromosome)
+* DDX3Y, ZFY, UTY, USP9Y (Y chromosome)
+
+(Publication: [Olney et al. *Biology of Sex Differences* 2020](https://pubmed.ncbi.nlm.nih.gov/32693839/))
+
+```{r sex-specific-gene-exp-vln, fig.width=7, fig.height = 7}
+
+VlnPlot(object = seurat_joint,
+        features = c("XIST", "DDX3Y", "ZFY", "UTY", "USP9Y"), cols = palette_sample,
+        group.by = "Sample",pt.size = 0)
+
+```
+
+Patient sample `NBFOXR2_6` more closely matches gene expression of patient samples 
+assigned male in the metadata. Therefore we also assign this patient male in our metadata.
+
+Based on this information, our single-cell cohort for NB-FOXR2 is balanced
+for patient sex.
+
+# TABLE: Human single-cell QC
+
+Export a supplementary table for human single-cell RNA-seq QC.
+
+```{r}
+
+meta_sc_foxr2 <- meta_sc %>% filter(Group == "NB-FOXR2") %>%
+    mutate(scRNAseq_path = gsub("data/", "", scRNAseq_path),
+           Note = case_when(
+               scRNAseq_path != "-" ~ "GEX from scRNAseq",
+               scMultiome_path != "-" & ID != "P-6778_S-10155" ~ "Only GEX used from scMultiome",
+               ID == "P-6778_S-10155" ~ "GEX and ATAC from scMultiome"
+           ))
+
+meta_sc_foxr2_scRNA_only <- meta_sc_foxr2 %>% filter(ID != "P-6778_S-10155")
+
+# get sample prep info ---------------------------------------------------------
+# get paths and IDs:
+path_id_map <- meta_sc_foxr2 %>%
+    select(ID, scRNAseq_path, scMultiome_path) %>%
+    mutate(Path = ifelse(scRNAseq_path != "-", scRNAseq_path, scMultiome_path)) %>%
+    select(ID, Path)
+
+scRNA_omega <- read_xlsx(here("data/metadata/20240404-Omegatable-singlecell.xlsx")) %>%
+    select(Sample,
+           Path,
+           Protocol,
+           Publication,
+           Kit = `kit version`,
+           Method_of_dissociation = `Method of dissociation`,
+           Starting_material = `Starting material`,
+           Starting_material_amount = `tissue (mg)`,
+           Targeted_N_cells = `cell/nuclei target`,
+           Sequencing_platform = `Instrument`) %>%
+    filter(Path %in% meta_sc_foxr2_scRNA_only$scRNAseq_path | Path %in% meta_sc_foxr2_scRNA_only$scMultiome_path) %>%
+    left_join(path_id_map, by = "Path")
+
+# get bioinformatics QC --------------------------------------------------------
+scRNAseq_qc <- map2_dfr(meta_sc_foxr2_scRNA_only$ID, meta_sc_foxr2_scRNA_only$sc_preprocessing_path_hydra,
+                        ~ data.table::fread(file.path(.y, "seurat_metrics.tsv"), data.table = FALSE) %>%
+                            tibble::add_column(ID = .x, ID_omega = .y, .before = 1)) %>%
+    left_join(scRNA_omega, by = "ID")
+
+# get Cellranger QC ------------------------------------------------------------
+scRNA_cellranger_qc <- map2_dfr(meta_sc_foxr2_scRNA_only$ID, meta_sc_foxr2_scRNA_only$Cellranger_path,
+                                ~ data.table::fread(.y, data.table = FALSE) %>%
+                                    mutate_all(as.character) %>%
+                                    tibble::add_column(ID = .x, .before = 1) %>%
+                                    tibble::add_column(Cellranger_path = .y, .after = 1))
+
+# # get processing params --------------------------------------------------------
+scRNA_config_params <- imap_dfr(samples_sc[meta_sc_foxr2_scRNA_only$ID], ~ .x@misc$params$config %>%
+                                    # drop the parameter which indicates the genes plot during preprocessing
+                                    discard_at("genes") %>%
+                                    data.frame() %>%
+                                    mutate(ID = .y))
+
+scRNA_config_params2 <- scRNA_config_params %>%
+    select(ID,
+           Min_cells = min_cells,
+           Min_features = min_features,
+           Vars_to_regress = var_regress,
+           N_principal_components = pcs_keep,
+           Clustering_resolution = clustering_resolution,
+           Seed = seed)
+
+TABLE_scRNAseq_qc <- scRNAseq_qc %>%
+    left_join(scRNA_cellranger_qc, by = c("ID")) %>%
+    left_join(scRNA_config_params2, by = "ID") %>%
+    left_join(meta_sc_foxr2_scRNA_only %>% select(ID, Note)) %>%
+    select(
+        # Sample info
+        ID,
+        # QC
+        Note,
+        Protocol,
+        Sequencing_platform,
+        Starting_material_amount,
+        Method_of_dissociation,
+        Targeted_N_cells,
+        N_reads = `Number of Reads`,
+        N_cells_estimated = `Estimated Number of Cells`,
+        N_cells_after_filtering = N_cells_after,
+        Reads_mapped_to_genome = `Reads Mapped to Genome`,
+        Reads_mapped_to_transcriptome = `Reads Mapped Confidently to Transcriptome`,
+        Min_cells, Min_features, Vars_to_regress, N_principal_components, Clustering_resolution, Seed,
+        Mean_mitochondrial_content_after_filtering = percent.mito_mean.postQC,
+        Mean_UMIs_after_filtering = nCount_RNA_mean.postQC,
+        Mean_N_genes_after_filtering = nFeature_RNA_mean.postQC,
+        Max_mito_threshold = percent.mito_max.threshold,
+        Min_N_genes_threshold = nFeature_RNA_min.threshold,
+        Max_N_genes_threshold = nFeature_RNA_max.threshold,
+        Max_UMIs_threshold = nCount_RNA_max.threshold) %>%
+    arrange(ID)
+
+rr_write_tsv(TABLE_scRNAseq_qc,
+             glue("{out}/TABLE_scRNAseq_QC.tsv"),
+             "Summary of sample info and QC for scRNAseq of human tumor samples")
+
+```
+
+Create a similar table for the multiome sample:
+
+```{r}
+
+meta_sc_foxr2_Multiome_only <- meta_sc_foxr2 %>% filter(ID == "P-6778_S-10155") %>%
+    mutate(Cellranger_path = file.path("/project/kleinman/singlecell_pipeline/data/",
+                                       scMultiome_path,
+                                       "cellranger-arc_count/summary.csv"))
+
+# get sample prep info ---------------------------------------------------------
+multiome_omega <- read_xlsx(here("data/metadata/20240404-Omegatable-singlecell.xlsx")) %>%
+    select(Sample,
+           Path,
+           Protocol,
+           Publication,
+           Kit = `kit version`,
+           Method_of_dissociation = `Method of dissociation`,
+           Starting_material = `Starting material`,
+           Starting_material_amount = `tissue (mg)`,
+           Targeted_N_cells = `cell/nuclei target`,
+           Sequencing_platform = `Instrument`) %>%
+    filter(Path %in% meta_sc_foxr2_Multiome_only$scMultiome_path) %>%
+    left_join(path_id_map, by = "Path")
+
+# get bioinformatics QC --------------------------------------------------------
+multiome_qc <- data.table::fread(file.path(meta_sc_foxr2_Multiome_only$sc_preprocessing_path_hydra, "seurat_metrics.tsv"), data.table = FALSE) %>%
+    tibble::add_column(ID = meta_sc_foxr2_Multiome_only$ID,
+                       ID_omega = meta_sc_foxr2_Multiome_only$sc_preprocessing_path_hydra,
+                       .before = 1) %>%
+    left_join(multiome_omega, by = "ID")
+
+# get Cellranger QC ------------------------------------------------------------
+multiome_cellranger_qc <- data.table::fread(meta_sc_foxr2_Multiome_only$Cellranger_path, data.table = FALSE) %>%
+    mutate_all(as.character) %>%
+    tibble::add_column(ID = meta_sc_foxr2_Multiome_only$ID, .before = 1) %>%
+    tibble::add_column(Cellranger_path = meta_sc_foxr2_Multiome_only$Cellranger_path, .after = 1)
+
+# # get processing params --------------------------------------------------------
+multiome_config_params <- samples_sc$`P-6778_S-10155`@misc$params$config %>%
+    discard_at("genes") %>%
+    data.frame() %>%
+    mutate(ID = "P-6778_S-10155")
+
+multiome_config_params2 <- multiome_config_params %>%
+    select(ID,
+           Min_cells = min_cells,
+           N_principal_components_RNA = rna_pcs_keep,
+           N_principal_components_ATAC = atac_pcs_keep,
+           Clustering_resolution = clustering_resolution,
+           Seed = seed)
+
+TABLE_multiome_qc <- multiome_qc %>%
+    left_join(multiome_cellranger_qc, by = c("ID")) %>%
+    left_join(multiome_config_params2, by = "ID") %>%
+    select(
+        # Sample info
+        ID,
+        # QC
+        Protocol,
+        Sequencing_platform,
+        Starting_material_amount,
+        Method_of_dissociation,
+        Targeted_N_cells,
+        Genome,
+        Cellranger_version = `Pipeline version`,
+        N_cells_estimated = `Estimated number of cells`,
+        N_cells_after_filtering = N_cells_after,
+        GEX_Reads_mapped_to_genome = `GEX Reads mapped confidently to genome`,
+        GEX_Reads_mapped_to_transcriptome = `GEX Reads mapped confidently to transcriptome`,
+        GEX_Mean_mitochondrial_content_after_filtering = percent.mito_mean.postQC,
+        GEX_Mean_UMIs_after_filtering = nCount_RNA_mean.postQC,
+        GEX_Mean_N_genes_after_filtering = nFeature_RNA_mean.postQC,
+        GEX_Max_mito_threshold = percent.mito_max.threshold,
+        GEX_Min_N_genes_threshold = nFeature_RNA_min.threshold,
+        GEX_Max_N_genes_threshold = nFeature_RNA_max.threshold,
+        GEX_Min_UMIs_threshold = nCount_RNA_min.threshold,
+        GEX_Max_UMIs_threshold = nCount_RNA_max.threshold,
+        ATAC_Fraction_transposition_events_in_peaks_in_cells = `ATAC Fraction of transposition events in peaks in cells`,
+        ATAC_Fraction_mapped_confidently = `ATAC Confidently mapped read pairs`,
+        ATAC_Fraction_fragments_in_peaks = `ATAC Fraction of high-quality fragments overlapping peaks`,
+        Min_cells, Clustering_resolution, N_principal_components_RNA, N_principal_components_ATAC, Seed,
+        ATAC_Median_fragments_per_cell = `ATAC Median high-quality fragments per cell`,
+        ATAC_Mean_nucleosome_signal_after_filtering = nucleosome_signal_mean.postQC,
+        ATAC_Mean_peak_region_fragments_after_filtering = atac_peak_region_fragments_mean.postQC,
+        ATAC_Mean_TSS_enrichment_after_filtering = TSS.enrichment_mean.postQC,
+        ATAC_Min_peak_region_fragments_threshold = atac_peak_region_fragments_min.threshold,
+        ATAC_Max_peak_region_fragments_threshold = atac_peak_region_fragments_max.threshold,
+        ATAC_Max_nucleosome_signal_threshold = nucleosome_signal_max.threshold,
+        ATAC_Min_TSS_enrichment_threshold = TSS.enrichment_min.threshold,
+        ATAC_Max_TSS_enrichment_threshold = TSS.enrichment_max.threshold)
+
+rr_write_tsv(TABLE_multiome_qc,
+             glue("{out}/TABLE_scMultiome_QC.tsv"),
+             "Summary of sample info and QC for scMultiome of human tumor sample (n=1)")
+
+```
+
+
+<!-- END MATTER, insert reproducibility info -->
+
+```{r footer, echo = FALSE, results = 'asis', warning = FALSE, cache = FALSE}
+
+# Knit child document with header
+res <- knitr::knit_child(here("include", "footer.Rmd"), envir = environment(), quiet = TRUE)
+cat(res, sep = '\n')
+
+```
+
+<!-- END OF END MATTER -->

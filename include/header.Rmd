@@ -22,7 +22,7 @@ message("Document index: ", doc_id)
 # Specify where to save outputs
 out        <- here("output", doc_id); dir.create(out, recursive = TRUE)
 figout     <- here("figures", doc_id, "/")
-cache      <- paste0("~/tmp/", basename(here()), "/", doc_id, "/")
+cache      <- paste0("/project/kleinman/bhavyaa.chandarana/cache/NB-FOXR2/public/", doc_id, "/")
 
 ```
 
@@ -80,7 +80,7 @@ knitr::opts_chunk$set(message = TRUE,
                       dev = c("png", "pdf"),
                       # Cache chunk results and use cache if the chunk hasn't
                       # been changed since last rendering
-                      cache = TRUE,
+                      cache = F,
                       cache.path = cache,
                       # Do not use lazy loading which fails for large objects
                       cache.lazy = FALSE,

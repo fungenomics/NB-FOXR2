@@ -1,0 +1,1094 @@
+---
+title: "06.1 - Project bulk tumors to normal developing brain"
+author: "Selin Jessa [[selin.jessa@mail.mcgill.ca](mailto:selin.jessa@mail.mcgill.ca)] and Bhavyaa Chandarana [[bhavyaa.chandarana@mail.mcgill.ca](mailto:bhavyaa.chandarana@mail.mcgill.ca)]"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    keep_md: yes
+    code_folding: show
+    theme: flatly
+    css: ../include/style.css
+    toc: yes
+    toc_depth: 4
+    number_sections: true
+    df_print: paged
+    includes:
+      before_body: ../include/header.html
+      after_body:  ../include/footer.html
+---
+
+<!-- FRONT MATTER, insert configuration info -->
+
+```{r header, echo = FALSE, results = 'asis', warning = FALSE}
+
+# Index of the document
+# ...determines name of the subfolder of `outputs` and `figures`
+doc_id <- "06.1"
+
+suppressMessages(library(here))
+
+# Knit child document with header
+res <- knitr::knit_child(here("include", "header.Rmd"), envir = environment(), quiet = TRUE)
+cat(res, sep = '\n')
+
+```
+
+<!-- END OF FRONT MATTER -->
+
+
+# Overview
+
+This document explores projections/mapping of tumors to normal using both
+bulk and single-cell RNAseq data.
+
+With bulk RNAseq data, the strategy is to evaluate
+enrichment of cell type-specific gene signatures (derived in `02`) in each bulk
+transcriptome. We can then evaluate the highest scoring signature(s) in each sample,
+or compare enrichment scores of gene signatures _between_ tumor types.
+
+# Libraries & functions
+
+```{r libs, warning = FALSE, message = FALSE, echo = TRUE, cache = FALSE}
+
+library(here)
+library(magrittr)
+library(tidyr)
+library(dplyr)
+library(readr)
+library(readxl)
+library(stringr)
+library(glue)
+library(purrr)
+library(ggplot2)
+library(ggrepel)
+library(tibble)
+library(broom)
+library(cowplot)
+library(Seurat)
+library(ComplexHeatmap)
+library(data.table)
+library(ggExtra)
+library(Rtsne)
+
+source(here("include/style.R"))
+source(here("code/functions/RNAseq.R"))
+source(here("code/functions/scRNAseq.R"))
+source(here("code/functions/ssGSEA.R"))
+
+ggplot2::theme_set(theme_min())
+
+square_theme <- theme(aspect.ratio = 1)
+large_text <- theme(text = element_text(size = 15))
+
+conflicted::conflicts_prefer(dplyr::filter)
+
+```
+
+```{r load-rdata}
+
+# Function to load an RData file and return it
+loadRData <- function(fileName){
+  
+  load(fileName)
+  get(ls()[ls() != "fileName"])
+  
+}
+
+```
+
+
+# Load metadata
+
+<div class="fold o">
+
+```{r read_meta, cache = FALSE}
+
+meta <- read_tsv(here("output/00/metadata_patients_NGS.tsv"))
+meta_bulk <- meta %>% filter(RNAseq == "Y")
+
+```
+
+</div>
+
+# Load signatures
+
+Load cell type specific gene signatures, compiled in document `02`, to use as
+input for ssGSEA:
+
+```{r load_sigs, cache = FALSE}
+
+load(here("output/02/signatures.Rda"))
+
+```
+
+# Load counts
+
+## Pediatric brain tumors (PBT)
+
+Load the raw counts from the bulk RNAseq pipeline, for the test set of pediatric brain tumors:
+
+```{r load_test_counts, cache = FALSE}
+
+# load counts aggregated with in-house pipeline
+test_raw_counts <- file.path(here("data/RNAseq/pipeline_l3/2023-05-test_pbt/counts/Ensembl.ensGene.exon.raw.tsv.gz")) %>%
+    read.table(header = T, row.names = 1, check.names = F, sep = "\t")
+
+# rename genes with ENSEMBL ID only
+head(rownames(test_raw_counts) %<>% strsplit(":") %>% sapply(getElement, 1))
+test_raw_counts <- as.matrix(test_raw_counts)
+
+test_raw_counts[1:5, 1:5]
+
+```
+
+Load raw counts for the background set of brain tumors/normal brain:
+
+```{r load_bg_counts, cache = FALSE}
+
+# load counts aggregated with in-house pipeline
+background_raw_counts <- file.path(here("data/RNAseq/pipeline_l3/2023-04-background_samples/counts/Ensembl.ensGene.exon.raw.tsv.gz")) %>%
+    read.table(header = T, row.names = 1, check.names = F, sep = "\t")
+
+# rename genes with ENSEMBL ID only
+head(rownames(background_raw_counts) %<>% strsplit(":") %>% sapply(getElement, 1))
+background_raw_counts <- as.matrix(background_raw_counts)
+
+background_raw_counts[1:5, 1:5]
+
+```
+
+## Extracranial neuroblastoma (EC-NB)
+
+For extra-cranial neuroblastomas from Gartlguber et al, Nature Cancer, 2021 (n=579)
+processed data was obtained from the [Shiny App](https://nbseb087.dkfz.de/project_NB_SE_viz/) associated with the study.
+
+```{r load_ecnb_counts}
+
+# load raw counts provided by the authors
+ecnb_counts <- readRDS(here("data/RNAseq/external_data/Gartlgruber_NatCancer_2021/tumor_RNAseq_Counts_Matrix.rds"))
+
+head(rownames(ecnb_counts))
+
+# extract ENSEMBL id only from gene names
+head(rownames(ecnb_counts) %<>% strsplit("\\.") %>% sapply(getElement, 1))
+ecnb_counts <- as.matrix(ecnb_counts)
+
+ecnb_counts[1:5, 1:5]
+
+```
+
+# Combine metadata
+
+## Load EC-NB metadata
+
+Load the sample metadata for Gartlgruber EC-NB dataset:
+
+```{r load_ecnb_meta}
+
+meta_ecnb <- readRDS(here("data/RNAseq/external_data/Gartlgruber_NatCancer_2021/annotation_tumor_RNAseq.rds"))
+
+# load annotation of ChIPseq data to look for overlapping samples
+meta_ecnb_chip <- readRDS(here("data/ChIPseq/external_data/Gartlgruber_NatCancer_2021/annotation_tumor_ChIPseq.rds"))
+
+meta_ecnb <- meta_ecnb %>%
+    left_join(meta_ecnb_chip, by = c("ProjectID", "MYCN", "Stage", "Age", "Risk", "Relapse")) %>% 
+    dplyr::rename(ID = ProjectID) %>%
+    mutate(Group = case_when(
+        MYCN == "Amp" ~ "EC-NB (MYCN-amp)",
+        TRUE ~ "EC-NB"))
+
+```
+
+Add metadata column for FOXR2 expression status in EC-NB:
+
+```{r ecnb-foxr2-positivity}
+
+# Load files and remove unused ones to save space
+load(here("output/03/Gartlgruber_et_al_counts.Rda"))
+rm(ecnb_counts_norm)
+rm(ecnb_counts_vst)
+
+# DESeq norm expression threshold used for FOXR2 +/-
+threshold <- 2
+
+foxr2_pos_samples <- ecnb_counts_tidy %>% 
+    filter(gene_symbol == "FOXR2") %>% 
+    filter(gene_expression > threshold) %>% 
+    .$sample
+
+meta_ecnb <- meta_ecnb %>% mutate(FOXR2_positive = case_when(ID %in% foxr2_pos_samples ~ "Y",
+                                      T ~ "N")) %>% 
+    mutate(Group = "EC-NB") %>% 
+    mutate(Source = "Gartlgruber et al. 2021")
+
+rm(ecnb_counts_tidy)
+
+```
+
+## Combine with PBT metadata
+
+Combine with brain tumor dataset:
+
+```{r combine_meta, cache = FALSE}
+
+meta_all <- bind_rows(meta_bulk, meta_ecnb)
+
+```
+
+# Run ssGSEA {.tabset}
+
+Run ssGSEA for each dataset:
+
+```{r run_ssgsea_test, eval = FALSE}
+
+# test set
+bulk_ssgsea <- compute_scores_bin(expr_mat  = test_raw_counts,
+                                  gene_sets = signatures_ens_all,
+                                  save_le   = FALSE,
+                                  alpha     = 0.75,
+                                  normalize = FALSE,
+                                  n_cores   = 1)
+
+saveRDS(bulk_ssgsea, file = glue("{out}/ssgsea_test.Rds"))
+
+```
+
+```{r run_ssgsea_background, eval = FALSE}
+
+# background set
+bulk_ssgsea_bg <- compute_scores_bin(expr_mat  = background_raw_counts,
+                                     gene_sets = signatures_ens_all,
+                                     save_le   = FALSE,
+                                     alpha     = 0.75,
+                                     normalize = FALSE,
+                                     n_cores   = 1)
+
+saveRDS(bulk_ssgsea_bg, file = glue("{out}/ssgsea_background.Rds"))
+
+```
+
+```{r run_ssgsea_ecnb, eval = FALSE}
+
+# extra-cranial NB
+bulk_ssgsea_ecnb <- compute_scores_bin(expr_mat  = ecnb_counts,
+                                       gene_sets = signatures_ens_all,
+                                       save_le   = FALSE,
+                                       alpha     = 0.75,
+                                       normalize = FALSE,
+                                       n_cores   = 1)
+
+saveRDS(bulk_ssgsea_ecnb, file = glue("{out}/ssgsea_ecnb.Rds"))
+
+```
+
+
+# Identify indiscriminant signatures
+
+First, we will evaluate the ssGSEA scores for reference signatures in our background
+set of tumors and normal brain. To do this, we count the number of samples
+where each signature appears in the top 10. We'll consider the top decile
+as indiscriminate.
+
+```{r sigs_indiscriminant}
+
+# control set
+bulk_ssgsea_bg <- readRDS(glue("{out}/ssgsea_background.Rds"))
+dim(bulk_ssgsea_bg)
+
+# filter to retained signatures
+bulk_ssgsea_bg_keep <- bulk_ssgsea_bg %>%
+    filter(Signature %in% signatures_keep)
+
+dim(bulk_ssgsea_bg_keep)
+
+# tidy dataframe
+bulk_ssgsea_bg_top <- bulk_ssgsea_bg_keep %>%
+    gather(Sample, Score, 2:ncol(.)) %>% 
+    group_by(Sample) %>% 
+    top_n(10, Score)
+
+# get n signatures - this many signatures appear in the top 10 of any sample
+n_sigs_top <- length(unique(bulk_ssgsea_bg_top$Signature))
+n_sigs_top
+
+# count the number of times each signature appears in the top 10 signatures for any sample
+counts_top <- bulk_ssgsea_bg_top %>% 
+    group_by(Signature) %>% 
+    dplyr::count() 
+
+# show the values
+counts_top %>% arrange(desc(n)) %>% DT::datatable()
+
+# get threshold at top decile
+(q <- quantile(counts_top$n, 0.9)[[1]])
+
+```
+
+Then, we can identify indiscriminant signatures by calculating a threshold $q$
+where the probability that $X$ is less than or equal to $q$ is 90%. 
+
+```{r signatures_indiscriminate_histogram}
+
+counts_top %>% 
+    ggplot(aes(x = n)) +
+    geom_histogram() +
+    geom_vline(xintercept = q, color = "red") +
+    xlab("Number of samples where the signatures is in the top 10") +
+    ylab("Number of signatures")
+
+```
+
+In other words, we identify indiscriminant signatures as those which are in the top
+10 of more samples than 90% of other signatures. As a sanity check, we have `r n_sigs_top`
+signatures appearing in the top 10 of any 
+sample, and then are taking the top `r .1*n_sigs_top` signatures as indiscriminant.
+
+```{r}
+
+# indiscriminant signatures
+(sigs_indiscriminant <- counts_top %>% filter(n >= q) %>% pull(Signature))
+length(sigs_indiscriminant)
+
+```
+
+In addition, we also filter out a MGE signature which we determined to be not
+specific to its associated cell type, based on expression of the genes in this
+signature across multiple cell types. (See following section.)
+
+```{r}
+
+sigs_indiscriminant <- c("MGE-NR2F1+,MEIS2+", sigs_indiscriminant)
+length(sigs_indiscriminant)
+
+save(sigs_indiscriminant, file = glue("{out}/sigs_indiscriminant.Rda"))
+
+```
+
+## Non-specific MGE signature
+
+In previous iterations of this analysis, MGE signature `MGE-NR2F1+,MEIS2+` appeared in top ssGSEA matches in the majority of DIPG-H3K27M. This was unexpected because DIPG-H3K27M appear in the pons, not in the forebrain, where the MGE structure appears during development.
+
+Let us check the detection rate of each gene of this signature in cells from a normal developmental atlas, namely MGE neurons vs. cell types that give rise to DIPG (OPC and oligodendrocytes) in both the pons and forebrain. We will also compare this with non-neural cell types (vascular, immune, endothelial) as a negative control.
+
+Define a function to plot detection rate per gene in a given signature:
+
+<details>
+
+```{r func-mge-neur-opc-ridge-plot}
+
+# Load full cell type ontology table for mouse developing forebrain and pons
+ontology_jessa_full <- fread("/project/kleinman/selin.jessa/from_narval/HGG-oncohistones/public/output/05/TABLE_mouse_cluster_info.tsv") %>%
+  select(Label, Level3_type) %>%
+  rename(Label_broad = Level3_type)
+
+# Function producing box plot of detection rate per gene in a signature
+# Within cell populations: MGE neurons, Forebrain OPC & oligodendrocytes, Pons OPC & oligodendrocytes, and non-neural cells
+plot_mge_neur_opc_box_plot <- function(signature,
+                                    signature_id,
+                                    conv_hg_to_mm){
+  print(signature_id)
+
+  ontology <- ontology_jessa_full
+
+  if(conv_hg_to_mm){
+
+    # Convert genes from human to mouse using cached biomaRt reference
+
+    # Produces file "genes_lds"
+    load(here("data/singlecell/references_genome/biomaRt_mm_to_hg_lds.Rda"))
+
+    # Store converted signature
+    mm_signature <- genes_lds %>% filter(HGNC.symbol %in% signature)
+
+    # Print any human genes that could not be converted
+    if(length(mm_signature) != length(signature)){
+
+      not_conv <- setdiff(signature, mm_signature$HGNC.symbol)
+      print(glue("The following genes of the provided signature could not be converted from human to mouse using biomaRt:"))
+      print(list(not_conv))
+
+    }
+
+    # Replace user-provided human signature with signature in mouse
+    signature <- mm_signature$MGI.symbol
+    rm(genes_lds)
+
+  }
+
+  # Load developing mouse atlas objects
+  atlas_dir <- "/project/kleinman/selin.jessa/from_hydra/atlas/data"
+  seurat_ct <- loadRData(glue("{atlas_dir}/joint_cortex_extended/joint_cortex_extended.seurat_v3.Rda"))
+  suppressMessages({
+    seurat_ct <- UpdateSeuratObject(seurat_ct)
+  })
+  seurat_po <- loadRData(glue("{atlas_dir}/joint_pons_extended/joint_pons_extended.seurat_v3.Rda"))
+  suppressMessages({
+    seurat_po <- UpdateSeuratObject(seurat_po)
+  })
+
+  # Store forebrain and pons objects in list and remove the originals
+  seurat_list <- c(seurat_ct, seurat_po)
+  names(seurat_list) <- c("cortex", "pons")
+  rm(seurat_ct)
+  rm(seurat_po)
+
+  # Add broad labels and categories for plot to Seurat objects
+  for(seurat_id in names(seurat_list)){
+
+    seurat <- seurat_list[[seurat_id]]
+    # Get metadata from Seurat object
+    labels <- seurat@meta.data %>%
+      select(ID_20210710) %>%
+      rownames_to_column(var = "cellname")
+    rownames(labels) <- NULL
+
+    # Add broad labels
+    labels <- labels %>%
+      left_join(ontology %>% select(Label, Label_broad),
+                by = c('ID_20210710' = 'Label')) %>%
+      column_to_rownames(var = "cellname")
+    seurat <- AddMetaData(seurat, labels)
+
+    # Group cells of selected cell type(s) for different rows of plot
+    if(seurat_id == "cortex"){
+
+      labels_ct <- labels %>%
+    mutate(plot_row = case_when(Label_broad %in% c("MGE inhibitory neurons") ~ "MGE inhibitory",
+                                Label_broad %in% c("OPC", "Oligodendrocytes") ~ "OPC/Oligo (cortex)",
+                                Label_broad %in% c("Meninges", "Endothelial", "Immune", "Pericytes") ~ "Endothelial/Immune (cortex)",
+                                TRUE ~ "Other"))
+      seurat <- AddMetaData(seurat, labels_ct)
+
+    } else if(seurat_id == "pons"){
+
+      labels_po <- labels %>%
+    mutate(plot_row = case_when(Label_broad %in% c("OPC", "Oligodendrocytes") ~ "OPC/Oligo (pons)",
+                                TRUE ~ "Other"))
+      seurat <- AddMetaData(seurat, labels_po)
+
+    }
+
+    seurat_list[[seurat_id]] <- seurat
+  }
+
+  # Retrieve detection rate for each gene in the signature
+
+  seurat_list[["cortex"]] <- seurat_list[["cortex"]][signature, ]
+  seurat_list[["pons"]] <- seurat_list[["pons"]][signature, ]
+  mat_list <- c()
+  mat_list[["cortex"]] <- as.matrix(seurat_list[["cortex"]]@assays$RNA@data)
+  mat_list[["pons"]] <- as.matrix(seurat_list[["pons"]]@assays$RNA@data)
+  pct_list <- c()
+
+  for(name in names(mat_list)){
+
+    x <- mat_list[[name]]
+
+    # Binarize
+    x[x > 0] <- 1
+
+    # Transpose preserving cell names
+    cellname <- colnames(x)
+    x <- as.data.table(t(x))
+    rownames(x) <- cellname
+
+    # Add in_group info for cells
+    x[, plot_row := as.character(seurat_list[[name]]@meta.data[["plot_row"]])]
+
+    # Get prop of cells expressing a gene, within group and out of group
+    pct <- x[, lapply(.SD, prop), by = plot_row]
+
+    # Convert to tidy format for plotting
+    pct <- pct %>%
+      pivot_longer(cols = colnames(pct)[-1], names_to = "Gene")
+
+    pct_list[[name]] <- pct
+  }
+
+  # Clean up
+  rm(seurat_list)
+  rm(mat_list)
+
+  # Join cortex and pons detection rates, removing "Other" cell type category from each
+  pct_list[["cortex"]] <- pct_list[["cortex"]] %>%
+    as.data.frame() %>%
+    filter(plot_row != "Other") %>%
+    rename(Cell_class = plot_row)
+  pct_list[["pons"]] <- pct_list[["pons"]] %>%
+    as.data.frame() %>%
+    filter(plot_row != "Other") %>%
+    rename(Cell_class = plot_row)
+  pct <- rbind(pct_list[["cortex"]], pct_list[["pons"]])
+
+  suppressMessages({
+  # Produce horizontal box plot
+  pct %>%
+    mutate(Cell_class = factor(Cell_class,
+                    levels = rev(c("MGE inhibitory",
+                               "OPC/Oligo (cortex)",
+                               "OPC/Oligo (pons)",
+                               "Endothelial/Immune (cortex)")))) %>%
+    ggplot(aes(x = value, y = Cell_class)) +
+    ggtitle(glue("{signature_id}")) +
+    geom_boxplot() +
+    xlab("% of cells expressing gene") +
+    ylab("") +
+    scale_x_continuous(breaks = c(0, 0.25, 0.5, 0.75, 1),
+                     limits = c(-0.05, 1.05)) +
+    theme(axis.title.x = element_text(hjust = 0.5)) 
+  })
+
+}
+
+
+```
+
+</details>
+
+Plot detection rate in the signature of interest `MGE-NR2F1+,MEIS2+`, along with two other MGE signatures used in the study:
+
+```{r mge-sig-specificity, fig.width=24, fig.height=6}
+
+sigs <- c("MGE-NR2F1+,MEIS2+",
+          "F-e12_MGINH",
+          "Human fetal GE MGE1")
+
+plot_list <- map(sigs,
+    ~ plot_mge_neur_opc_box_plot(signature = signatures_sym_all[[.x]],
+                              signature_id = .x,
+                              conv_hg_to_mm = T) + large_text)
+
+plot_grid(plotlist = plot_list, nrow = 1)
+
+```
+
+The `MGE-NR2F1+,MEIS2+` gene signature actually has a lower detection rate in MGE
+inhibitory neurons than the OPC of the forebrain and pons. Therefore, we remove
+this signature from our analysis for non-specific expression to the MGE.
+
+## TABLE: Reference signatures
+
+Here, we'll prepare a supplementary table containing all the reference gene signatures
+and their associated cell types/datasets from which they originate.
+
+```{r table_ref_sigs, cache = FALSE}
+
+# collapse signatures into strings
+sigs_sym_df <- imap_dfr(signatures_sym_all,
+                        ~ data.frame(Cluster = .y, Signature_sym = glue_collapse(.x, sep = ",")))
+
+sigs_ens_df <- imap_dfr(signatures_ens_all,
+                        ~ data.frame(Cluster = .y, Signature_ENS = glue_collapse(.x, sep = ",")))
+
+# join with cell type annotation
+TABLE_ref_sigs <- cell_type_anno_all %>% 
+    left_join(sigs_sym_df) %>% 
+    left_join(sigs_ens_df) %>%
+    # filter to kept signatures
+    filter(Keep) %>% 
+    select(-Keep) %>%
+    mutate(Cell_type = ifelse(is.na(Cell_type), Cluster, Cell_type)) %>% 
+    mutate(Included = ifelse(Cluster %in% sigs_indiscriminant, "N", "Y"))
+
+rr_write_tsv(TABLE_ref_sigs,
+             glue("{out}/TABLE_reference_signatures.tsv"),
+             "Cell type specific reference signatures and associated metadata and dataset info")
+
+```
+
+
+# Tidy ssGSEA scores
+
+Combine the ssGSEA scores from the two datasets:
+
+```{r combine_ssgsea, fig.width = 15, fig.height = 4, dependson = 'sigs_indiscriminant'}
+
+bulk_ssgsea_test <- readRDS(glue("{out}/ssgsea_test.Rds"))
+bulk_ssgsea_ecnb <- readRDS(glue("{out}/ssgsea_ecnb.Rds"))
+
+scores_all <- full_join(bulk_ssgsea_test, bulk_ssgsea_ecnb, by = "Signature") %>%
+    as.data.frame() %>%
+    # filter out short signatures
+    filter(Signature %in% signatures_keep) %>% 
+    # filter out the indiscriminant signature
+    filter(!(Signature %in% sigs_indiscriminant))
+
+scores_all$Signature %>% unique %>% length()
+
+# correct a sample naming issue, where samples with numeric names XX get converted to XX.0
+# and save a map between the coerced and cleaned names
+sample_naming_map <- data.frame(Sample = colnames(scores_all))
+sample_idx <- which(grepl("\\.0$", colnames(scores_all)))
+colnames(scores_all)[sample_idx] <- gsub("\\.0$", "", colnames(scores_all)[sample_idx])
+sample_naming_map$Sample_clean <- colnames(scores_all)
+
+# get the set of test samples
+test_samples <- base::setdiff(colnames(bulk_ssgsea_test), "Signature")
+test_samples <- plyr::mapvalues(test_samples, from = sample_naming_map$Sample, to = sample_naming_map$Sample_clean, warn_missing = FALSE)
+
+scores_tidy <- scores_all %>%
+    # convert to tidy/long format
+    gather("Sample", "Score", 2:ncol(.)) %>%
+    # join with sample metadata
+    left_join(meta_all, by = c("Sample" = "ID")) %>%
+    # join with signature metadata
+    left_join(cell_type_anno_all %>% dplyr::rename("Reference_sample" = Sample, "Reference_age" = Age),
+              by = c("Signature" = "Cluster")) %>%
+    # set ordering
+    mutate(Group = factor(Group, levels = names(palette_groups))) %>%
+    arrange(Group) %>%
+    mutate(Sample = factor(Sample, levels = unique(.$Sample))) %>% 
+    mutate(Class = factor(Class, levels = names(palette_class)))
+
+save(scores_all, scores_tidy, test_samples, file = glue("{out}/ssgsea_scores_tidy.Rda"))
+
+# count samples
+scores_tidy %>% distinct(Sample, Group) %>% group_by(Group) %>% count()
+
+```
+
+# Dimensionality reduction
+
+## Intracranial human tumors alone
+
+In-house processed data for human tumors alone:
+
+```{r ssgsea_dimred_inhouse, fig.width = 20, fig.height = 6}
+
+perp <- 10
+                             
+tsne_plot <- scores_all[, c("Signature", test_samples)] %>%
+     tibble::column_to_rownames(var = "Signature") %>% 
+     as.matrix() %>% 
+     ssgsea_dim_red(method = "tsne", return_df = TRUE, perplexity = perp) %>%
+     left_join(meta_all, by = c("Sample" = "ID")) %>%
+     plot_dim_red(method = "tsne", palette = palette_groups,
+                  point_size = 3, alpha = 0.8, title = glue("Perplexity: {perp}")) + square_theme + large_text
+
+tsne_plot
+
+```
+
+## Intra + extracranial tumors
+
+PBT with Gartlgruber dataset High risk & Stage 4 EC-NB (samples with NA in either column are removed).
+
+Note that this dimensionality reduction tSNE plot does not exactly match the published figure, as the algorithm is stochastic, and a random seed was not set at the time of creating publication figure.
+
+```{r ssgsea_dimred_with_ecnb_stage4_HR_only, fig.width = 7, fig.height = 6}
+
+palette_groups_mut <- palette_groups
+palette_groups_mut <- c(palette_groups_mut, "EC-NB: MYCN Amp" = "#A575D3")
+palette_groups_mut <- c(palette_groups_mut, "EC-NB: FOXR2+, MYCN NonAmp" = "#f382c6")
+palette_groups_mut <- c(palette_groups_mut, "EC-NB: FOXR2-, MYCN NonAmp" = "#215ba3")
+
+perplexity <- 30
+
+meta_ecnb <- meta_ecnb %>%
+    mutate(Group = case_when(
+        MYCN == "Amp" ~ "EC-NB: MYCN Amp",
+        MYCN == "NonAmp" & FOXR2_positive == "Y" ~ "EC-NB: FOXR2+, MYCN NonAmp",
+        MYCN == "NonAmp" & FOXR2_positive == "N" ~ "EC-NB: FOXR2-, MYCN NonAmp"))
+
+meta_all <- bind_rows(meta_bulk, meta_ecnb)
+
+non_stage4_HR_ecnb <- meta_ecnb %>% 
+    filter(Stage != "4" | Risk != "HR" | is.na(Stage) | is.na(Risk)) %>% 
+    .$ID
+
+length(non_stage4_HR_ecnb)
+
+length(filter(meta_ecnb, !(ID %in% non_stage4_HR_ecnb))$ID)
+
+tsne_calc <- scores_all %>%
+                select(c("Signature", test_samples, filter(meta_ecnb, !(ID %in% non_stage4_HR_ecnb))$ID)) %>% 
+                 tibble::column_to_rownames(var = "Signature") %>% 
+                 as.matrix() %>% 
+                 ssgsea_dim_red(method = "tsne", return_df = TRUE, perplexity = perplexity)
+
+(tsne_plot <- tsne_calc %>% left_join(meta_all, by = c("Sample" = "ID")) %>% 
+                            .[which(!(.$Sample %in% non_stage4_HR_ecnb)),] %>% 
+                            plot_dim_red(method = "tsne", palette = palette_groups_mut,
+                                          point_size = 2, alpha = 0.8, title = glue("High risk & Stage 4 EC-NB only, Perplexity: {perplexity}")) + square_theme + large_text)
+
+```
+
+# Absolute scores
+
+Check if distributions are similar:
+
+```{r scores_dist, fig.width = 30, fig.height = 4}
+
+scores_tidy %>% 
+    ggplot(aes(x = Sample, y = Score)) +
+    geom_boxplot(aes(fill = Group), outlier.shape = NA) +
+    scale_fill_manual(values = palette_groups) +
+    rotate_x() +
+    ggtitle("Distribution of ssGSEA scores (across signatures) in each sample") +
+    theme(axis.text.x = element_blank())
+
+```
+
+## Top scoring signature per tumor
+
+Pediatric brain tumor cohort:
+
+```{r top_scores_pbt, fig.width = 20, fig.height = 8}
+
+scores_tidy %>%
+    filter(Sample %in% test_samples) %>% 
+    group_by(Sample) %>%
+    arrange(desc(Score)) %>%
+    top_n(10, Score) %>%
+    ggplot(aes(x = Sample, y = Score)) +
+    geom_point(aes(colour = Class), size = 2, alpha = 0.8) +
+    scale_colour_manual(values = palette_class) +
+    facet_grid(~ Group, space = "free", scales = "free_x") +
+    rotate_x() +
+    ggtitle("Top 10 signatures in each sample, PBTs, coloured by cell class")
+
+```
+
+Gartlgruber 2021 extracranial neuroblastoma:
+
+```{r top_scores_ecnb, fig.width = 10, fig.height = 5}
+
+scores_tidy %>%
+    filter(Sample %in% meta_ecnb$ID) %>% 
+    group_by(Sample) %>%
+    arrange(desc(Score)) %>%
+    top_n(10, Score) %>%
+    ggplot(aes(x = Sample, y = Score)) +
+    geom_point(aes(colour = Class), size = 0.5, alpha = 0.8) +
+    scale_colour_manual(values = palette_class) +
+    facet_grid(~ Group, space = "free", scales = "free_x") +
+    rotate_x() +
+    theme(axis.text.x = element_blank()) +
+    ggtitle("Top 10 signatures in each sample, EC-NB Gartlgruber 2021, coloured by cell class")
+
+```
+
+Top score in each sample, across pediatric brain tumor groups:
+
+```{r top_scores_all, fig.width = 20, fig.height = 5}
+
+scores_top_pbt <- scores_tidy %>% 
+    filter(Sample %in% test_samples) %>%
+    group_by(Sample) %>%
+    arrange(desc(Score)) %>%
+    top_n(1, Score) %>% 
+    arrange(desc(Score)) %>%
+    mutate(Sample = factor(Sample, levels = unique(.$Sample)))
+
+scores_top_pbt %>% 
+    ggplot(aes(x = Sample, y = Score)) +
+    geom_col(aes(fill = Class), width = 0.8) +
+    scale_fill_manual(values = palette_class) +
+    xlab("Sample") + ylab(NULL) +
+    geom_text(aes(label = Signature), angle = 90, nudge_y = 200, hjust = 0) +
+    facet_grid(~ Group, scales = "free_x", space = "free") +
+    no_legend() +
+    theme_min2() +
+    theme(axis.text.x = element_blank()) +
+    coord_cartesian(ylim = c(22500, 35000))
+
+# Print top signature for each sample
+scores_top_pbt %>% group_by(Group) %>%
+    mutate(n_group = n()) %>% 
+    group_by(Group, Signature) %>% 
+    summarize(n = n(), prop = n / n_group) %>%
+    distinct() %>% 
+    arrange(Group, desc(n))
+
+```
+
+Top matching signature per tumor type:
+
+```{r bulk-pbt-projection-stacked-bar, fig.width = 7, fig.height = 5}
+
+scores_tidy %>%
+    filter(Sample %in% test_samples) %>%
+    group_by(Sample) %>%
+    arrange(desc(Score)) %>%
+    top_n(1, Score) %>%
+    mutate(Group = factor(Group,
+                          levels = c("NB-FOXR2",
+                                     "ETMR",
+                                     "MB-SHH",
+                                     "MB-WNT",
+                                     "DIPG-H3K27M-FOXR2",
+                                     "DIPG-H3K27M",
+                                     "HGG-IDH",
+                                     "EP-PFA",
+                                     "HGG-H3.3G34R/V"))) %>%
+    ggplot(aes(x = Group)) +
+    geom_bar(aes(fill = Class), size = 2, alpha = 0.8) +
+    scale_fill_manual(values = palette_class) +
+    theme(axis.text.x = element_text(angle = 30, vjust = 1, hjust=1))
+
+
+```
+
+Top signature in NB-FOXR2:
+
+```{r top-scores-nb-foxr2, fig.width=8, fig.height=8}
+
+scores_top_nbfoxr2 <- scores_top_pbt %>% filter(Group == "NB-FOXR2")
+
+scores_top_nbfoxr2 %>% 
+    ungroup() %>% 
+    count(Signature, Class) %>% 
+    ggplot(aes(x = reorder(Signature, n),
+               y = n,
+               fill = Class)) +
+    geom_col() +
+    scale_fill_manual(values = palette_class) +
+    coord_flip() +
+    xlab("Signature") +
+    ylab("Number of samples") +
+    large_text +
+    theme(legend.position = "bottom")
+
+
+```
+
+Top signature in extracranial neuroblastoma (Gartlgruber cohort):
+
+```{r top_scores_ec_nb, fig.width = 10, fig.height = 5}
+
+scores_top_ec <- scores_tidy %>% 
+    filter(Sample %in% meta_ecnb$ID) %>%
+    group_by(Sample) %>%
+    arrange(desc(Score)) %>%
+    top_n(1, Score) %>% 
+    arrange(desc(Score)) %>%
+    mutate(Sample = factor(Sample, levels = unique(.$Sample)))
+
+scores_top_ec %>% 
+    ggplot(aes(x = Sample, y = Score)) +
+    geom_col(aes(fill = Class, color = Class)) +
+    scale_color_manual(values = palette_class) +
+    scale_fill_manual(values = palette_class) +
+    xlab("Sample") + ylab(NULL) +
+    theme(axis.text.x = element_blank()) +
+    coord_cartesian(ylim = c(22500, 30000)) 
+
+# Print percentage of EC-NB samples mapping to each signature
+(prop <- scores_top_ec %>%
+    group_by(Signature) %>%
+    count() %>% 
+    mutate(prop = n/sum(.$n)) %>%
+    arrange(desc(n)))
+
+# Print total number of EC-NB samples in Gartlgruber cohort
+sum(prop$n)
+
+```
+
+### TABLE: Cell type signature enrichment
+
+Save top scoring signatures for each tumor in a supplementary table:
+
+```{r table_ssgsea, cache = FALSE}
+
+TABLE_top_scores <- bind_rows(scores_top_pbt, scores_top_ec) %>%
+    select(Sample, Group, Signature, Score, Reference_sample,
+           Reference_age, Cell_type, Dataset, Species, Class) %>%
+    arrange(Group)
+
+dim(TABLE_top_scores)
+table(as.character(TABLE_top_scores$Group))
+
+rr_write_tsv(TABLE_top_scores,
+             glue("{out}/TABLE_top_scores.tsv"),
+             "Top scoring ssGSEA signature for each bulk tumor")
+
+```
+
+## Top 10 signatures per sample
+
+Define a helper function for per-sample plots of the top 10 signatures:
+
+<details>
+
+```{r}
+
+# Extract top 10 per sample
+top_scores <- scores_tidy %>%
+    group_by(Sample) %>%
+    arrange(desc(Score)) %>%
+    top_n(10, Score)
+
+#' @param goi Character, group of interest
+plot_scores_per_sample <- function(goi) {
+    
+    samples <- top_scores %>% filter(Group == goi) %>% pull(Sample) %>% unique()
+    
+    p1 <- map(samples,
+              ~ top_scores %>% 
+                  filter(Sample == .x) %>% 
+                  arrange(Score) %>%
+                  mutate(Signature = factor(Signature, levels = .$Signature)) %>% 
+                  ggplot(aes(x = Signature, y = Score)) +
+                  geom_col(aes(fill = Class), width = 0.5) +
+                  scale_fill_manual(values = palette_class) +
+                  theme_min2() +
+                  rotate_x() +
+                  xlab(NULL) + ylab(NULL) +
+                  ggtitle(.x) +
+                  no_legend() +
+                  coord_flip(ylim = c(20000, 30000)))
+    
+    plot_grid(plotlist = p1, align = "hv", axis = "rltb", ncol = 4)
+    
+}
+
+```
+
+</details>
+
+Plot top 10 signatures per NB-FOXR2 sample:
+
+```{r top_scores_NB-FOXR2, fig.width = 25, fig.height = 16}
+
+plot_scores_per_sample("NB-FOXR2")
+
+```
+
+# Comparative analysis
+
+In this section, we perform a comparative analysis of ssGSEA enrichment
+scores between tumor types. We'll broadly divide brain tumors into neuronal
+and glial tumor types, and compare NB-FOXR2 to each of these broad groups.
+Here, we exclude H3.3G34R/V tumors, since this tumor has an interneuron signal
+([Chen et al, *Cell* 2020](https://pubmed.ncbi.nlm.nih.gov/33259802/)).
+
+```{r ssgsea_t_tests}
+
+# Label tumors as neuronal or glial, remove G34
+scores_tidy_comp <- scores_tidy %>%
+    filter(!grepl("EC", Group)) %>% 
+    mutate(Group_comp = case_when(
+        Group == "NB-FOXR2" ~ "NB-FOXR2",
+        grepl("MB|ETMR|HGNET", Group) ~ "Neuronal",
+        grepl("HGG|PFA|DIPG", Group) &
+            Group != "HGG-H3.3G34R/V" ~ "Glial",
+    ))
+
+# sanity check
+any(scores_tidy$Signature %in% sigs_indiscriminant)
+
+# compute the mean per signature per group
+scores_group_means <- scores_tidy_comp %>% 
+    mutate(Score = scales::rescale(Score, to = c(0, 1))) %>% 
+    group_by(Signature, Group_comp) %>%
+    summarise(group_mean = mean(Score))
+
+# using broom to run pairwise t tests between groups based on the score
+# NOTE: see below on differences in defaults between pairwise.t.test and t.test
+# https://stackoverflow.com/a/11457871
+scores_tidy_ttest <- scores_tidy_comp %>% 
+    group_by(Signature) %>% 
+    summarise(ttest = list(pairwise.t.test(Score, Group_comp, p.adjust = "none",
+                                           paired = FALSE,
+                                           pool.sd = FALSE))) %>%
+    mutate(ttest = map(ttest, broom::tidy)) %>%
+    unnest(cols = c(ttest)) %>% 
+    mutate(p_adj = p.adjust(p.value, method = "BH"))
+
+# add the group estimates after pairwise tests for later analysis
+scores_tidy_ttest <- scores_tidy_ttest %>% 
+    left_join(scores_group_means, by = c("Signature", "group1" = "Group_comp")) %>%
+    dplyr::rename(group1_mean = group_mean) %>% 
+    left_join(scores_group_means, by = c("Signature", "group2" = "Group_comp")) %>%
+    dplyr::rename(group2_mean = group_mean)
+
+write_tsv(scores_tidy_ttest, glue("{out}/ssgsea_scores_tests.tsv"))
+
+```
+
+Data wrangling to make sure the fold-changes are in the same direction for each
+comparison:
+
+```{r wrangle_tests, dependson = "ssgsea_t_tests"}
+
+scores_tidy_ttest_foxr2 <- scores_tidy_ttest %>% 
+    filter(group1 == "NB-FOXR2" | group2 == "NB-FOXR2") %>% 
+    mutate(log10p = -log10(p_adj),
+           log2fc = log2(group1_mean / group2_mean)) %>%
+    # put all group1 as NB-FOXR2, and reverse L2FC if needed
+    # this is because the pairwise t-tests do not perform two tests for each
+    # pair of groups (i.e. only A vs B, not A vs B and B vs A)
+    mutate(
+        group_tmp = group1,
+        # if the Group2 is NB-FOXR2, then the LFC sign needs to be switched
+        log2fc = ifelse(group2 == "NB-FOXR2", -log2fc, log2fc),
+        # if the Group2 is NB-FOXR2, swap group1 and 2
+        group1 = ifelse(group2 == "NB-FOXR2", "NB-FOXR2", group1),
+        group2 = ifelse(group2 == "NB-FOXR2", group_tmp, group2)
+    ) %>% 
+    select(-group_tmp) %>% 
+    mutate(signif = ifelse(p_adj < 0.01, TRUE, FALSE)) %>% 
+    left_join(cell_type_anno_all, by = c("Signature" = "Cluster"))
+
+```
+
+Visualize the results as volcano plots:
+
+```{r volcano, fig.width = 13, fig.height = 6, dependson = "ssgsea_t_tests"}
+
+df1 <- scores_tidy_ttest_foxr2 %>% 
+    filter(group2 == "Neuronal")
+
+p1 <- df1 %>%
+    mutate(Class = ifelse(log2fc < 0 | p_adj > 0.01, "Other", Class)) %>%
+    ggplot(aes(x = log2fc, y = -log10(p_adj))) +
+    geom_hline(yintercept = 2, color = "gray50", linetype = 2) +
+    geom_vline(xintercept = 0, color = "gray50", linetype = 2) +
+    geom_point(aes(color = Class, size = -log10(p_adj)), alpha = 0.8) +
+    scale_color_manual(values = palette_class) +
+    no_legend() +
+    ggtitle("NB-FOXR2 vs neuronal tumors") +
+    coord_cartesian(xlim = c(-0.3, 0.3))
+
+df2 <- scores_tidy_ttest_foxr2 %>%
+    filter(group2 == "Glial")
+
+p2 <- df2 %>%
+    mutate(Class = ifelse(log2fc < 0 | p_adj > 0.01, "Other", Class)) %>%
+    ggplot(aes(x = log2fc, y = -log10(p_adj))) +
+    geom_hline(yintercept = 2, color = "gray50", linetype = 2) +
+    geom_vline(xintercept = 0, color = "gray50", linetype = 2) +
+    geom_point(aes(color = Class, size = -log10(p_adj)), alpha = 0.8) +
+    scale_color_manual(values = palette_class) +
+    no_legend() +
+    ggtitle("NB-FOXR2 vs glial tumors") +
+    coord_cartesian(xlim = c(-0.3, 0.3))
+
+plot_grid(p1, p2, nrow = 1)
+
+# with signature labels
+p1 <- p1 + geom_text_repel(data = df1 %>% filter(-log10(p_adj) > 5 & log2fc > 0),
+                    aes(label = Signature, color = Class),
+                    size = 4)
+p2 <- p2 + geom_text_repel(data = df2 %>% filter(-log10(p_adj) > 10 & log2fc > 0),
+                    aes(label = Signature, color = Class),
+                    size = 4)
+
+plot_grid(p1, p2, nrow = 1)
+
+```
+
+
+
+<!-- END MATTER, insert reproducibility info -->
+
+```{r footer, echo = FALSE, results = 'asis', warning = FALSE, cache = FALSE}
+
+# Knit child document with header
+res <- knitr::knit_child(here("include", "footer.Rmd"), envir = environment(), quiet = TRUE)
+cat(res, sep = '\n')
+
+```
+
+<!-- END OF END MATTER -->

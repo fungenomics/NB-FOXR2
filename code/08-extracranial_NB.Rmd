@@ -1,0 +1,465 @@
+---
+title: "08 - Extracranial neuroblastoma"
+author: "Selin Jessa [[selin.jessa@mail.mcgill.ca](mailto:selin.jessa@mail.mcgill.ca)] and Bhavyaa Chandarana [[bhavyaa.chandarana@mail.mcgill.ca](mailto:bhavyaa.chandarana@mail.mcgill.ca)]"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    keep_md: yes
+    code_folding: show
+    theme: flatly
+    css: ../include/style.css
+    toc: yes
+    toc_depth: 4
+    number_sections: true
+    df_print: paged
+    includes:
+      before_body: ../include/header.html
+      after_body:  ../include/footer.html
+---
+
+<!-- FRONT MATTER, insert configuration info -->
+
+```{r header, echo = FALSE, results = 'asis', warning = FALSE}
+
+# Index of the document
+# ...determines name of the subfolder of `outputs` and `figures`
+doc_id <- "08"
+
+suppressMessages(library(here))
+
+# Knit child document with header
+res <- knitr::knit_child(here("include", "header.Rmd"), envir = environment(), quiet = TRUE)
+cat(res, sep = '\n')
+
+```
+
+<!-- END OF FRONT MATTER -->
+
+
+# Overview
+
+This document compares NB-FOXR2 with extracranial neuroblastoma samples
+stratified by stage and FOXR2 expression.
+
+# Libraries
+
+```{r libs, warning = FALSE, message = FALSE, echo = TRUE, cache = FALSE}
+
+library(here)
+library(magrittr)
+library(tidyr)
+library(dplyr)
+library(readr)
+library(readxl)
+library(stringr)
+library(glue)
+library(purrr)
+library(ggplot2)
+library(ggrepel)
+library(tibble)
+library(cowplot)
+library(Seurat)
+library(data.table)
+library(MetBrewer)
+library(dendextend)
+library(readxl)
+library(GSVA)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(GO.db)
+library(ComplexHeatmap)
+
+source(here("include/style.R"))
+source(here("code/functions/RNAseq.R"))
+source(here("code/functions/scRNAseq.R"))
+source(here("code/functions/ssGSEA.R"))
+
+ggplot2::theme_set(theme_min())
+
+square_theme <- theme(aspect.ratio = 1)
+large_text <- theme(text = element_text(size = 15))
+
+conflicted::conflicts_prefer(dplyr::select)
+conflicted::conflicts_prefer(dplyr::filter)
+conflicted::conflicts_prefer(dplyr::first)
+conflicted::conflicts_prefer(dplyr::last)
+conflicted::conflicts_prefer(dplyr::combine)
+conflicted::conflicts_prefer(dplyr::intersect)
+conflicted::conflicts_prefer(base::setdiff)
+conflicted::conflicts_prefer(clusterProfiler::slice)
+conflicted::conflicts_prefer(dplyr::rename)
+conflicted::conflicts_prefer(dplyr::desc)
+conflicted::conflicts_prefer(dplyr::filter)
+
+```
+
+# Load EC-NB samples
+
+## Gartlgruber et al. 2021 (n=579)
+
+Publication: [Gartlgruber et al. *Nature Cancer* 2021](https://pubmed.ncbi.nlm.nih.gov/35121888/)
+
+### Load data
+
+Load raw counts and metadata. This data was downloaded from a 
+[public web app]((https://nbseb087.dkfz.de/project_NB_SE_viz/#shiny-tab-faq)) 
+provided by the authors of the study.
+
+Data was provided as un-normalized ("raw") bulk counts and per-tumor metadata.
+
+Load DESeq normalized counts produced in in R markdown document 03, for plotting
+gene expression.
+
+```{r load-norm-counts}
+
+# Load files and remove unused ones to save space
+load(here("output/03/Gartlgruber_et_al_counts.Rda"))
+rm(ecnb_counts_norm)
+rm(ecnb_counts_vst)
+
+```
+
+
+### Add FOXR2 positivity to metadata
+
+Here, we label each tumor as FOXR2 positive or negative in per-tumor metadata 
+based on normalized expression of FOXR2. 
+We consider tumors with FOXR2 DESeq normalized expression > 2 to be FOXR2 positive. 
+
+```{r add-foxr2-positivity-meta}
+
+# Set threshold of FOXR2+ expression used throughout this document
+threshold <- 2
+
+ecnb_foxr2_counts <- ecnb_counts_tidy %>%
+    filter(gene_symbol == "FOXR2")
+
+foxr2_pos_samples <- ecnb_foxr2_counts %>% 
+    filter(gene_expression > threshold) %>% 
+    .$sample
+
+ecnb_foxr2_counts <- ecnb_foxr2_counts %>% mutate(FOXR2_positive = case_when(sample %in% foxr2_pos_samples ~ "Y",
+                                      T ~ "N"))
+
+# Print the number of FOXR2 positive and negative samples
+ecnb_foxr2_counts %>% count(FOXR2_positive, sort = F)
+
+# Print the number of FOXR2 positive and negative samples in each tumor stage
+ecnb_foxr2_counts %>% count(Stage, FOXR2_positive, sort = F)
+
+ecnb_counts_tidy <- ecnb_counts_tidy %>% 
+    mutate(FOXR2_positive = case_when(sample %in% foxr2_pos_samples ~ "FOXR2+",
+                                      T ~ "FOXR2-"))
+
+```
+
+## TARGET cohort (n=128)
+
+Downloaded and processed by Steven Hébert in April 2024. 
+
+They were downloaded as count matrices from the public Genomic
+686 Data Commons (GDC) cancer portal (https://portal.gdc.cancer.gov/) 
+using the Cohort Builder, with options: 
+
+* `project = TARGET-346 NBL`
+* `Experimental Strategy = RNA-seq`
+* `Access = open`
+
+### Load data
+
+Patients were subsetted to Risk = HR (high risk) and Stage = 3 or 4 (not 4S).
+This resulted in a total of 128 patient samples.
+
+Load patient sample metadata.
+
+```{r load-ecnb-target-meta}
+
+# Load, replace the empty value '-- with NA values and remove all-NA columns, 
+# and rename id column to Sample
+target_meta <- data.table::fread(here("data/RNAseq/external_data/TARGET_ECNB/clinical.tsv")) %>%
+    apply(2, 
+              function(col) { 
+                  gsub(col, pattern = "'--", replacement = as.character(NA)) 
+              }
+          ) %>% 
+    as.data.frame() %>% 
+    select_if(~ !all(is.na(.))) %>% 
+    dplyr::rename(Sample = case_submitter_id)
+
+```
+
+Load DESeq-normalized counts (for plotting gene expression).
+
+```{r load-ecnb-target-norm-counts}
+
+# load normalized counts
+target_norm <- here("data/RNAseq/external_data/TARGET_ECNB/counts_ensembl_common/GENCODEv36.norm.tsv.gz") %>%
+    read.table(header = T, row.names = 1, check.names = F, sep = "\t")
+
+# Display first 5 row/col to check
+target_norm[1:5, 1:5]
+
+```
+
+### Add FOXR2 positivity to metadata
+
+Based on threshold = 2.
+
+```{r add-foxr2-positivity-meta-target}
+
+# DESeq norm expression threshold used for FOXR2 +/-
+threshold <- 2
+
+target_counts_tidy <- target_norm %>% 
+    as.data.frame() %>% 
+    rownames_to_column("Gene") %>% 
+    separate(col = "Gene", sep = ":", into = c("ENS", "gene_symbol")) %>% 
+    pivot_longer(cols = -c("ENS", "gene_symbol"), names_to = "ID", values_to = "gene_expression")
+    
+foxr2_pos_samples_target <- target_counts_tidy %>% 
+    filter(gene_symbol == "FOXR2") %>% 
+    filter(gene_expression > threshold) %>% 
+    .$ID 
+
+target_meta_foxr2 <- target_counts_tidy %>% 
+    mutate(FOXR2_positive = case_when(ID %in% foxr2_pos_samples_target ~ "Y",
+                                      T ~ "N")) %>% 
+    select(ID, FOXR2_positive) %>% distinct
+
+```
+
+# FOXR2 coexpression with MGE TFs in EC-NB
+
+## Gartlgruber et al. 2021
+
+Stage 4, high-risk tumors only
+FOXR2 threshold: DESEq normalized value "2".
+
+```{r FOXR2-coexp-ECNB, fig.height=4, fig.width=24}
+
+tum_interest <- ecnb_counts_tidy %>% 
+    filter(Risk == "HR") %>%
+    filter(Stage == "4") %>% 
+    filter(gene_symbol %in% c("FOXR2", "LHX6", "DLX5", "DLX6"))
+
+# DLX5
+foxr2_dlx5 <- tum_interest %>% 
+    filter(gene_symbol %in% c("FOXR2", "DLX5")) %>% 
+    pivot_wider(names_from = "gene_symbol", 
+                values_from = "gene_expression", 
+                id_cols = c("sample", "FOXR2_positive")) 
+
+(cor_foxr2_dlx5 <- cor(foxr2_dlx5$FOXR2, foxr2_dlx5$DLX5, method = "pearson"))
+
+(sig_dlx5 <- wilcox.test(foxr2_dlx5 %>% filter(FOXR2_positive == "FOXR2+") %>% .$DLX5,
+                         foxr2_dlx5 %>% filter(FOXR2_positive == "FOXR2-") %>% .$DLX5))
+
+dlx5_scatter <- foxr2_dlx5 %>% 
+    ggplot(aes(x = FOXR2, y = DLX5, alpha = 0.2)) + 
+    geom_point(alpha = 0.5, size = 3) + 
+    ggtitle("DLX5 - EC-NB stage 4") +
+    annotate("text", label = glue("r == {round(cor_foxr2_dlx5,4)}"),
+             x = 470, y = 4000, parse = T)
+
+dlx5_vln <- foxr2_dlx5 %>% 
+    ggplot(aes(x = FOXR2_positive, y = DLX5, fill = FOXR2_positive)) + 
+    geom_violin(scale = "width") + 
+    ggtitle("DLX5 - EC-NB stage 4") + 
+    no_legend() + scale_y_log10() + 
+    stat_summary(fun.y=median, geom="crossbar", size=1, 
+                 color="black", aes(width = 0.3)) +
+    annotate("text", label = glue("p == {round(sig_dlx5$p.value,4)}"),
+             x = 2, y = 4000, parse = T)
+
+
+# DLX6
+foxr2_dlx6 <- tum_interest %>% 
+    filter(gene_symbol %in% c("FOXR2", "DLX6")) %>% 
+    pivot_wider(names_from = "gene_symbol", 
+                values_from = "gene_expression", 
+                id_cols = c("sample", "FOXR2_positive")) 
+
+(cor_foxr2_dlx6 <- cor(foxr2_dlx6$FOXR2, foxr2_dlx6$DLX6, method = "pearson"))
+
+(sig_dlx6 <- wilcox.test(foxr2_dlx6 %>% filter(FOXR2_positive == "FOXR2+") %>% .$DLX6,
+                         foxr2_dlx6 %>% filter(FOXR2_positive == "FOXR2-") %>% .$DLX6))
+
+dlx6_scatter <- foxr2_dlx6 %>% 
+    ggplot(aes(x = FOXR2, y = DLX6, alpha = 0.2)) + 
+    geom_point(alpha = 0.5, size = 3) + ggtitle("DLX6 - EC-NB stage 4") +
+    annotate("text", label = glue("r == {round(cor_foxr2_dlx6,4)}"),
+             x = 470, y = 3000, parse = T)
+
+dlx6_vln <- foxr2_dlx6 %>% 
+    ggplot(aes(x = FOXR2_positive, y = DLX6, fill = FOXR2_positive)) + 
+    geom_violin(scale = "width") + 
+    ggtitle("DLX6 - EC-NB stage 4") + 
+    no_legend() + scale_y_log10() + 
+    stat_summary(fun.y=median, geom="crossbar", size=1, 
+                 color="black", aes(width = 0.3))  +
+    annotate("text", label = glue("p == {round(sig_dlx6$p.value,4)}"),
+             x = 2, y = 4000, parse = T)
+
+
+
+# LHX6
+foxr2_lhx6 <- tum_interest %>% 
+    filter(gene_symbol %in% c("FOXR2", "LHX6")) %>% 
+    pivot_wider(names_from = "gene_symbol", 
+                values_from = "gene_expression", 
+                id_cols = c("sample", "FOXR2_positive")) 
+
+(cor_foxr2_lhx6 <- cor(foxr2_lhx6$FOXR2, foxr2_lhx6$LHX6, method = "pearson"))
+
+(sig_lhx6 <- wilcox.test(foxr2_lhx6 %>% filter(FOXR2_positive == "FOXR2+") %>% .$LHX6,
+                         foxr2_lhx6 %>% filter(FOXR2_positive == "FOXR2-") %>% .$LHX6))
+
+lhx6_scatter <- foxr2_lhx6 %>% 
+    ggplot(aes(x = FOXR2, y = LHX6, alpha = 0.2)) + 
+    geom_point(alpha = 0.5, size = 3) + 
+    ggtitle("LHX6 - EC-NB stage 4") +
+    annotate("text", label = glue("r == {round(cor_foxr2_lhx6,4)}"),
+             x = 470, y = 600, parse = T)
+
+lhx6_vln <- foxr2_lhx6 %>% 
+    ggplot(aes(x = FOXR2_positive, y = LHX6, fill = FOXR2_positive)) + 
+    geom_violin(scale = "width") + 
+    ggtitle("LHX6 - EC-NB stage 4") + 
+    no_legend() + 
+    stat_summary(fun.y=median, geom="crossbar", size=1, 
+                 color="black", aes(width = 0.3))  +
+    annotate("text", label = glue("p == {round(sig_lhx6$p.value,4)}"),
+             x = 2, y = 600, parse = T)
+
+
+cowplot::plot_grid(dlx5_scatter, dlx5_vln,
+                                dlx6_scatter, dlx6_vln,
+                                lhx6_scatter, lhx6_vln,
+                   nrow = 1, align = "hv")
+
+```
+
+## TARGET cohort
+
+FOXR2 + threshold: DESEq normalized value "2".
+
+```{r FOXR2-coexp-TARGET, fig.height=4, fig.width=24}
+
+tum_interest <- target_counts_tidy %>% 
+    filter(gene_symbol %in% c("FOXR2", "LHX6", "DLX5", "DLX6")) %>%
+    left_join(., target_meta_foxr2, by = "ID") %>% 
+    dplyr::rename("sample" = "ID") %>% 
+    mutate(FOXR2_positive = case_when(FOXR2_positive == "Y" ~ "FOXR2+",
+                                      FOXR2_positive == "N" ~ "FOXR2-",
+                                      TRUE ~ NA))
+
+# DLX5
+foxr2_dlx5 <- tum_interest %>% 
+    filter(gene_symbol %in% c("FOXR2", "DLX5")) %>% 
+    pivot_wider(names_from = "gene_symbol", 
+                values_from = "gene_expression", 
+                id_cols = c("sample", "FOXR2_positive")) 
+
+(cor_foxr2_dlx5 <- cor(foxr2_dlx5$FOXR2, foxr2_dlx5$DLX5, method = "pearson"))
+
+(sig_dlx5 <- wilcox.test(foxr2_dlx5 %>% filter(FOXR2_positive == "FOXR2+") %>% .$DLX5,
+                         foxr2_dlx5 %>% filter(FOXR2_positive == "FOXR2-") %>% .$DLX5))
+
+dlx5_scatter <- foxr2_dlx5 %>% 
+    ggplot(aes(x = FOXR2, y = DLX5, alpha = 0.2)) + 
+    geom_point(alpha = 0.5, size = 3) + 
+    ggtitle("DLX5 - EC-NB stage 4") +
+    annotate("text", label = glue("r == {round(cor_foxr2_dlx5,4)}"),
+            x = 900, y = 5500, parse = T)
+
+dlx5_vln <- foxr2_dlx5 %>% 
+    ggplot(aes(x = FOXR2_positive, y = DLX5, fill = FOXR2_positive)) + 
+    geom_violin(scale = "width") + 
+    ggtitle("DLX5 - EC-NB stage 4") + 
+    no_legend() + scale_y_log10() + 
+    stat_summary(fun.y=median, geom="crossbar", size=1, 
+                 color="black", aes(width = 0.3)) +
+    annotate("text", label = glue("p == {round(sig_dlx5$p.value,4)}"),
+             x = 2, y = 5500, parse = T)
+
+
+# DLX6
+foxr2_dlx6 <- tum_interest %>% 
+    filter(gene_symbol %in% c("FOXR2", "DLX6")) %>% 
+    pivot_wider(names_from = "gene_symbol", 
+                values_from = "gene_expression", 
+                id_cols = c("sample", "FOXR2_positive")) 
+
+(cor_foxr2_dlx6 <- cor(foxr2_dlx6$FOXR2, foxr2_dlx6$DLX6, method = "pearson"))
+
+(sig_dlx6 <- wilcox.test(foxr2_dlx6 %>% filter(FOXR2_positive == "FOXR2+") %>% .$DLX6,
+                         foxr2_dlx6 %>% filter(FOXR2_positive == "FOXR2-") %>% .$DLX6))
+
+dlx6_scatter <- foxr2_dlx6 %>% 
+    ggplot(aes(x = FOXR2, y = DLX6, alpha = 0.2)) + 
+    geom_point(alpha = 0.5, size = 3) + ggtitle("DLX6 - EC-NB stage 4") +
+    annotate("text", label = glue("r == {round(cor_foxr2_dlx6,4)}"),
+              x = 900, y = 3500, parse = T)
+
+dlx6_vln <- foxr2_dlx6 %>% 
+    ggplot(aes(x = FOXR2_positive, y = DLX6, fill = FOXR2_positive)) + 
+    geom_violin(scale = "width") + 
+    ggtitle("DLX6 - EC-NB stage 4") + 
+    no_legend() + scale_y_log10() + 
+    stat_summary(fun.y=median, geom="crossbar", size=1, 
+                 color="black", aes(width = 0.3))  +
+    annotate("text", label = glue("p == {round(sig_dlx6$p.value,4)}"),
+              x = 2, y = 3500, parse = T)
+
+
+
+# LHX6
+foxr2_lhx6 <- tum_interest %>% 
+    filter(gene_symbol %in% c("FOXR2", "LHX6")) %>% 
+    pivot_wider(names_from = "gene_symbol", 
+                values_from = "gene_expression", 
+                id_cols = c("sample", "FOXR2_positive")) 
+
+(cor_foxr2_lhx6 <- cor(foxr2_lhx6$FOXR2, foxr2_lhx6$LHX6, method = "pearson"))
+
+(sig_lhx6 <- wilcox.test(foxr2_lhx6 %>% filter(FOXR2_positive == "FOXR2+") %>% .$LHX6,
+                         foxr2_lhx6 %>% filter(FOXR2_positive == "FOXR2-") %>% .$LHX6))
+
+lhx6_scatter <- foxr2_lhx6 %>% 
+    ggplot(aes(x = FOXR2, y = LHX6, alpha = 0.2)) + 
+    geom_point(alpha = 0.5, size = 3) + 
+    ggtitle("LHX6 - EC-NB stage 4") +
+    annotate("text", label = glue("r == {round(cor_foxr2_lhx6,4)}"),
+             x = 900, y = 900, parse = T)
+
+lhx6_vln <- foxr2_lhx6 %>% 
+    ggplot(aes(x = FOXR2_positive, y = LHX6, fill = FOXR2_positive)) + 
+    geom_violin(scale = "width") + 
+    ggtitle("LHX6 - EC-NB stage 4") + 
+    no_legend() + 
+    stat_summary(fun.y=median, geom="crossbar", size=1, 
+                 color="black", aes(width = 0.3))  +
+    annotate("text", label = glue("p == {round(sig_lhx6$p.value,4)}"),
+             x = 2, y = 900, parse = T)
+
+
+cowplot::plot_grid(dlx5_scatter, dlx5_vln,
+                    dlx6_scatter, dlx6_vln,
+                    lhx6_scatter, lhx6_vln,
+                   nrow = 1, align = "hv")
+
+
+```
+
+
+<!-- END MATTER, insert reproducibility info -->
+
+```{r footer, echo = FALSE, results = 'asis', warning = FALSE, cache = FALSE}
+
+# Knit child document with header
+res <- knitr::knit_child(here("include", "footer.Rmd"), envir = environment(), quiet = TRUE)
+cat(res, sep = '\n')
+
+```
+
+<!-- END OF END MATTER -->

@@ -1,0 +1,415 @@
+---
+title: "09 - FOXR2 CUT&RUN in FOXR2 p53LOF mouse models"
+author: "Bhavyaa Chandarana [[bhavyaa.chandarana@mail.mcgill.ca](mailto:bhavyaa.chandarana@mail.mcgill.ca)] and Steven Hébert [[steven.hebert@ladydavis.ca](mailto:steven.hebert@ladydavis.ca)]"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    self_contained: yes
+    keep_md: yes
+    code_folding: show
+    theme: flatly
+    css: ../include/style.css
+    toc: yes
+    toc_depth: 4
+    number_sections: true
+    df_print: paged
+    includes:
+      before_body: ../include/header.html
+      after_body:  ../include/footer.html
+---
+
+<!-- FRONT MATTER, insert configuration info -->
+
+```{r header, echo = FALSE, results = 'asis', warning = FALSE}
+
+# Index of the document
+# ...determines name of the subfolder of `outputs` and `figures`
+doc_id <- "09"
+
+suppressMessages(library(here))
+
+# Knit child document with header
+res <- knitr::knit_child(here("include", "header.Rmd"), envir = environment(), quiet = TRUE)
+cat(res, sep = '\n')
+
+```
+
+<!-- END OF FRONT MATTER -->
+
+
+# Overview
+
+In this document, we analyze FOXR2 CUT&RUN (similar to ChIP) performed in n=3 
+cell lines derived from Foxr2 p53 LOF murine models.
+
+Note that throughout the code we refer to the CUT&RUN data as "ChIP" due
+to its similarity in the analysis stage.
+
+# Libraries
+
+```{r libs, warning = FALSE, message = FALSE, echo = TRUE, cache = FALSE}
+
+library(here)
+library(magrittr)
+library(tidyr)
+library(dplyr)
+library(readr)
+library(readxl)
+library(stringr)
+library(glue)
+library(purrr)
+library(ggplot2)
+library(cowplot)
+library(ComplexHeatmap)
+library(GenomeInfoDb)
+library(GenomicRanges)
+library(GenomicFeatures)
+library(rtracklayer)
+library(Seurat)
+library(Signac)
+library(gprofiler2)
+library(VennDiagram)
+
+source(here("include/style.R"))
+source(here("code/functions/scRNAseq.R"))
+source(here("code/functions/RNAseq.R"))
+
+ggplot2::theme_set(theme_min())
+
+
+```
+
+# Load data
+
+FOXR2-V5 CUT&RUN (similar to ChIP) was run with two protocols "native" and "X-link",
+with n=2 replicates each. 
+
+A FOXR2-V5 experiment was also run in a cell line lacking V5-tagged insertion (n=2 
+replicates) which we use here to filter false positive peaks.
+
+```{r load-peaks, cache=F}
+
+chip_path <- here("data/ChIPseq/pipeline_genpipes/peaks")
+
+# X-link FOXR2 peaks
+rep1_FOXR2_peaks <- rtracklayer::import(glue("{chip_path}/AN24377_FOXR2_P53LOF_1_X-link_JAB1979A5-1.V5_peaks.narrowPeak"), format = "narrowPeak") 
+rep2_FOXR2_peaks <- rtracklayer::import(glue("{chip_path}/AN24377_FOXR2_P53LOF_2_X-link_JAB1979A5-2.V5_peaks.narrowPeak"), format = "narrowPeak")
+
+# X-link V5 peaks
+rep1_V5_peaks <- rtracklayer::import(glue("{chip_path}/AH25351_G34R_1_X-link_JAB1979A5-3.V5_peaks.narrowPeak"), format = "narrowPeak")
+rep2_V5_peaks <- rtracklayer::import(glue("{chip_path}/AH25351_G34R_2_X-link_JAB1979A5-4.V5_peaks.narrowPeak"), format = "narrowPeak")
+
+# Create lists of peaks
+chip_foxr2_peak_list <- list(rep1_FOXR2 = rep1_FOXR2_peaks,
+               rep2_FOXR2 = rep2_FOXR2_peaks)
+
+chip_V5_peak_list <- list(rep1_V5 = rep1_V5_peaks,
+               rep2_V5 = rep2_V5_peaks)
+
+# Remove non-standard chromosomes/contigs from each sample
+standard_chrom_mm <- function(gr) { 
+    gr <- gr[GenomicRanges::seqnames(gr) %in% c(1:19, 'X', 'Y')]
+    GenomeInfoDb::seqlevels(gr) <- c(1:19, 'X', 'Y')
+    return(gr)
+}
+
+chip_foxr2_peak_list <- map(chip_foxr2_peak_list, standard_chrom_mm)
+chip_V5_peak_list <- map(chip_V5_peak_list, standard_chrom_mm)
+
+```
+
+# Define peaks
+
+## Filter V5 peaks
+
+We have control data from FOXR2-V5 CUT&RUN in a cell line lacking V5 insertion.
+The peaks in this sample arise from binding regions of V5 antibody
+in the genome. We use this as a background to filter out false positive peaks.
+
+```{r compare-peak-count-v5, cache=F}
+
+# Concatenate the V5 peaks 
+all_V5_peaks <- c(chip_V5_peak_list[[1]], chip_V5_peak_list[[2]]) %>%
+  sortSeqlevels %>%
+  sort %>%
+  reduce(min.gapwidth = 0)
+
+# Remove V5 peaks from the FOXR2 peaks
+chip_foxr2_peak_list_no_V5 <- chip_foxr2_peak_list
+chip_foxr2_peak_list_no_V5[[1]] <- subsetByOverlaps(chip_foxr2_peak_list_no_V5[[1]], all_V5_peaks, invert = T, minoverlap = 10)
+chip_foxr2_peak_list_no_V5[[2]] <- subsetByOverlaps(chip_foxr2_peak_list_no_V5[[2]], all_V5_peaks, invert = T, minoverlap = 10)
+
+# Check the length of the peak lists (as a QC)
+map(chip_foxr2_peak_list, length)
+map(chip_foxr2_peak_list_no_V5, length)
+
+# Create a narrowpeak file for the ChIP-seq FOXR2 samples after removing the V5 peaks 
+write.table(chip_foxr2_peak_list_no_V5[[1]], file = glue("{out}/rep1_FOXR2_no_V5.narrowpeak"), sep = "\t", quote = F, row.names = F, col.names = T)
+write.table(chip_foxr2_peak_list_no_V5[[2]], file = glue("{out}/rep2_FOXR2_no_V5.narrowpeak"), sep = "\t", quote = F, row.names = F, col.names = T)
+
+```
+
+## Intersect FOXR2 CUT&RUN & ATAC-seq peaks
+
+We expect high-quality FOXR2 CUT&RUN peaks to overlap with open chromatin
+(ATAC-seq peaks) derived from scMultiome of the same mouse model.
+
+Here, we compute the overlap between these peaks, and use ATAC peaks
+to filter CUT&RUN peaks. In the end, we retain the intersect of peaks between
+ATAC-seq, and the two replicates of X-link FOXR2 CUT&RUN.
+
+Define a function to plot triple venn diagram:
+
+```{r triple-venn}
+
+# Function to plot triple venn diagram from a list containing 3 GRanges objects
+venn_from_gr_list <- function(gr_list, plot_title){
+    
+  overlap_all <- Reduce(function(x, y) subsetByOverlaps(x, y, minoverlap = 10), gr_list) %>% length()
+  
+  overlap_12 <- findOverlaps(gr_list[[1]], gr_list[[2]], minoverlap = 10)
+  overlap_23 <- findOverlaps(gr_list[[2]], gr_list[[3]], minoverlap = 10)
+  overlap_13 <- findOverlaps(gr_list[[1]], gr_list[[3]], minoverlap = 10)
+  
+  n_overlap_12 <- min(length(unique(queryHits(overlap_12))), length(unique(subjectHits(overlap_12))))
+  n_overlap_23 <- min(length(unique(queryHits(overlap_23))), length(unique(subjectHits(overlap_23))))
+  n_overlap_13 <- min(length(unique(queryHits(overlap_13))), length(unique(subjectHits(overlap_13))))
+  
+  venn.plot = draw.triple.venn(length(gr_list[[1]]),
+                 length(gr_list[[2]]),
+                 length(gr_list[[3]]),
+                 n_overlap_12,
+                 n_overlap_23,
+                 n_overlap_13,
+                 overlap_all,
+                 category = c("rep1_FOXR2", "rep2_FOXR2", "ATAC"),
+                 euler.d = T,
+                 scaled = T,
+                 fill = c("#33CC00", "#33CC00", "#009999"))
+
+  grid.draw(venn.plot)
+}
+```
+
+Load ATAC peaks:
+
+```{r compare-chip-atac, cache=F}
+
+# Load ATAC peaks produced from multiome processing pipeline
+Foxr2_p53_r1_ATAC_peaks <- rtracklayer::import(here("data/singlecell/pipeline_scMultiome_mm/AN24377/ATAC/macs2.peaks.standard.blacklistremoved.narrowpeak"), format = "narrowPeak")
+
+# Note that the blacklisted peaks were removed from list of peaks
+# The list of blacklisted peaks comes from this set (from Signac package)
+write.table(Signac::blacklist_mm10, file = glue("{out}/blacklist_mm10.tsv"), 
+            sep = "\t", quote = F, row.names = F, col.names = F)
+
+# Modify the blacklist_mm10 file to get a sorted bed files with names
+system(glue("sort -Vk1,1 -k2,2 -k3,3 {out}/blacklist_mm10.tsv | 
+               cut -f1-3,6 |
+               sed 's/ /_/g' > {out}/blacklist_mm10.bed"))
+
+# Remove non-standard chromosomes
+Foxr2_p53_r1_ATAC_peaks <- standard_chrom_mm(Foxr2_p53_r1_ATAC_peaks)
+
+### Check number of peaks overlapping without any filtering
+peak_list <- c(chip_foxr2_peak_list_no_V5, FOXR2_ATAC = Foxr2_p53_r1_ATAC_peaks)
+venn_from_gr_list(peak_list, "venn_ChIP_ATAC_nofilter")
+
+# Add width column to the peaks
+chip_foxr2_peak_list_no_V5 <- map(chip_foxr2_peak_list_no_V5, ~ { 
+  .x$width <- width(.x)
+  return(.x)
+})
+
+Foxr2_p53_r1_ATAC_peaks$width <- width(Foxr2_p53_r1_ATAC_peaks)
+
+```
+
+Filter CUT&RUN and ATAC peaks by quality metrics:
+
+```{r filter-chip-atac}
+
+# Filter peaks of ChIP-seq and ATAC-seq
+# Peaks from ChIP-seq and ATAC-seq have different value distribution 
+# (signalValue, qValue), so different thresholds need to be used.
+filtered_2_chip_foxr2_peak_list_no_V5 <- map(chip_foxr2_peak_list_no_V5,
+        ~ .x[which(.x$qValue > 6 & .x$signalValue > 6 & .x$width < 10000),])
+filtered_2_Foxr2_p53_r1_ATAC_peaks <- Foxr2_p53_r1_ATAC_peaks[Foxr2_p53_r1_ATAC_peaks$qValue > 4 &
+                                                            Foxr2_p53_r1_ATAC_peaks$signalValue > 2 &
+                                                            Foxr2_p53_r1_ATAC_peaks$width < 10000,]
+
+### Check number of peaks overlapping
+filtered_2_peak_list <- c(filtered_2_chip_foxr2_peak_list_no_V5, FOXR2_ATAC = filtered_2_Foxr2_p53_r1_ATAC_peaks)
+venn_from_gr_list(filtered_2_peak_list, "venn_ChIP_ATAC_filtered_stringent")
+
+# export the peaks into bed files
+imap(filtered_2_peak_list[1:2], ~export.bed(.x, 
+                                     con=glue("{out}/{.y}_qVal6_FC6_width10k.bed"), 
+                                     format = "bed")) 
+
+export.bed(filtered_2_peak_list[[3]], 
+         con=glue("{out}/FOXR2_ATAC_qVal4_FC2_width10k.bed"), 
+         format = "bed")
+```
+
+Take the intersecting peaks between the n=2 FOXR2 CUT&RUN and ATAC:
+
+```{r intersect-chip-atac}
+
+# Create a bed file of the overlap between the 3 sets of peaks (ChIP FOXR2 rep 1&2, ATAC FOXR2-p53 rep1) 
+overlap_all <- Reduce(function(x, y) subsetByOverlaps(x, y, minoverlap = 10), filtered_2_peak_list)
+export.bed(overlap_all, con = glue("{out}/intersect_ChIP_ATAC_qVal6_FC6_width10k.bed"), format = "bed")
+
+# Create the intersect with the exact bases that intersect the ChIP FOXR2 rep 1&2 and ATAC FOXR2-p53 rep1
+# Run after: module load bedtools/2.30.0
+system(glue("intersectBed -a {out}/rep1_FOXR2_qVal6_FC6_width10k.bed -b {out}/rep2_FOXR2_qVal6_FC6_width10k.bed > {out}/exact_ChIP-intersect_qVal6_FC6_width10k.bed"))
+system(glue("intersectBed -a {out}/exact_ChIP-intersect_qVal6_FC6_width10k.bed -b {out}/FOXR2_ATAC_qVal4_FC2_width10k.bed > {out}/exact_intersect_ChIP_ATAC_qVal6_FC6_width10k.bed"))
+
+```
+
+## Peak QC metric distribution
+
+Plot histograms of metrics (signal, p-val, q-val) distributions across
+CUT&RUN peaks, with QC thresholds for each metric as a vertical line.
+
+```{r histo-peaks, fig.width = 12, fig.height = 4}
+
+qval_threshold <- c(6, 6, 4)
+fold_threshold <- c(6, 6, 2)
+width_threshold1 <- 1
+width_threshold2 <- 10000
+
+# Q values
+# log-log scale
+map2(names(peak_list), qval_threshold,
+     ~ data.frame(num = peak_list[[.x]]$name,
+                  qValue = peak_list[[.x]]$qValue) %>% 
+            ggplot(aes(x = log2(qValue))) +
+            geom_histogram(bins = 100) +
+            xlab("log2(-log10(qValue))") +
+            ggtitle(glue("{.x} - q-value")) +
+            geom_vline(xintercept = log2(.y), color = "red"))  %>% 
+    cowplot::plot_grid(plotlist = ., ncol = 3)
+
+# Fold enrichment
+map2(names(peak_list), fold_threshold,
+     ~ data.frame(num = peak_list[[.x]]$name,
+                  fold_enrichment = peak_list[[.x]]$signalValue) %>% 
+            ggplot(aes(x = log2(fold_enrichment))) +
+            geom_histogram(bins = 100) +
+            xlab("log2(fold_enrichment)") +
+            ggtitle(glue("{.x} - signal")) +
+            geom_vline(xintercept = log2(.y), color = "red")) %>% 
+    cowplot::plot_grid(plotlist = ., ncol = 3)
+
+# Peak width
+
+width_df <- function(gr){
+    
+    df <- data.frame(num = gr$name)
+    df$width <- width(gr)
+    return(df)
+    
+}
+
+imap(peak_list,
+     ~ width_df(.x) %>% 
+            ggplot(aes(x = width)) +
+            geom_histogram(bins = 300) +
+            xlab("peak width") +
+            ggtitle(glue("{.y} - width")) +
+            geom_vline(xintercept = width_threshold1, color = "red") +
+            geom_vline(xintercept = width_threshold2, color = "red"))  %>% 
+    cowplot::plot_grid(plotlist = ., ncol = 3)
+
+
+```
+
+# Motif analysis
+
+Motif analysis with HOMER was conducted with scripts in the following directory:
+
+```
+code/scripts/ChIP
+```
+
+Originally written and run by Steven Hébert.
+
+```{r motif_analysis, cache=F}
+
+# Load Homer motif results
+motifs <- read_tsv(glue("{out}/motifs_size100_100/knownResults.txt"))
+
+# Adjust p-values and count the number of significant motifs
+motifs_adj <- motifs %>%
+  mutate(padj_BH = p.adjust(`P-value`, method = "BH")) 
+nrow(filter(motifs_adj, padj_BH < 0.05))
+
+
+
+```
+
+Plot the top motifs and their -log10 adjusted p-value, coloring by the motif type
+(ETS, SOX, other)
+
+```{r plot-motifs}
+
+motifs_gg <- motifs %>%
+  mutate(padj_BH = p.adjust(`P-value`, method = "BH")) %>%
+  slice_max(order_by = -`Log P-value`, n = 13, with_ties = T) %>%
+  mutate(Motif_name = str_split(`Motif Name`, "/", simplify = T)[,1]) %>% 
+  mutate(Motif_group = case_when(grepl(.$Motif_name, pattern = "ETS") ~ "ETS",
+                                 grepl(.$Motif_name, pattern = "Sox") ~ "SOX",
+                                 TRUE                                        ~ "Other"))
+
+motifs_gg %>% 
+  ggplot(aes(x = -log10(padj_BH), y = reorder(Motif_name, -padj_BH))) +
+  geom_bar(stat = "identity", aes(fill = Motif_group)) +
+  ylab("Motif") +
+  xlab("-log10(padj)") +
+  scale_fill_manual(values = c("ETS" = "darkgoldenrod1",
+                               "SOX" = "darkolivegreen3",
+                               "Other" = "grey70")) +
+  theme(legend.position = "none")
+
+```
+
+Reorder the bars to group the motif types together, and rank by adjusted p-value
+within each of the groups.
+
+```{r plot-motifs-reorder}
+
+df <- motifs_gg %>% 
+    arrange(padj_BH) %>% 
+    dplyr::select(Motif_name, Motif_group) 
+
+order <- c(df %>% filter(Motif_group == "ETS") %>% .$Motif_name,
+           df %>% filter(Motif_group == "SOX") %>% .$Motif_name,
+           df %>% filter(Motif_group == "Other") %>% .$Motif_name)
+
+motifs_gg %>% 
+  mutate(Motif_name = factor(Motif_name, levels = rev(order))) %>% 
+  ggplot(aes(x = -log10(padj_BH), y = Motif_name)) +
+  geom_bar(stat = "identity", aes(fill = Motif_group)) +
+  ylab("Motif") +
+  xlab("-log10(padj)") +
+  scale_fill_manual(values = c("ETS" = "darkgoldenrod1",
+                               "SOX" = "darkolivegreen3",
+                               "Other" = "grey70")) +
+  theme(legend.position = "none")
+
+
+```
+
+
+<!-- END MATTER, insert reproducibility info -->
+
+```{r footer, echo = FALSE, results = 'asis', warning = FALSE, cache = FALSE}
+
+# Knit child document with header
+res <- knitr::knit_child(here("include", "footer.Rmd"), envir = environment(), quiet = TRUE)
+cat(res, sep = '\n')
+
+```
+
+<!-- END OF END MATTER -->

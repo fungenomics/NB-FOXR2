@@ -1,0 +1,380 @@
+---
+title: "03 - Prep tumor bulk RNAseq data"
+author: "Selin Jessa [[selin.jessa@mail.mcgill.ca](mailto:selin.jessa@mail.mcgill.ca)] and Bhavyaa Chandarana [[bhavyaa.chandarana@mail.mcgill.ca](mailto:bhavyaa.chandarana@mail.mcgill.ca)]"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    keep_md: yes
+    code_folding: show
+    theme: flatly
+    css: ../include/style.css
+    toc: yes
+    toc_depth: 4
+    number_sections: true
+    df_print: paged
+    includes:
+      before_body: ../include/header.html
+      after_body:  ../include/footer.html
+---
+
+<!-- FRONT MATTER, insert configuration info -->
+
+```{r header, echo = FALSE, results = 'asis', warning = FALSE}
+
+# Index of the document
+# ...determines name of the subfolder of `outputs` and `figures`
+doc_id <- "03"
+
+suppressMessages(library(here))
+
+# Knit child document with header
+res <- knitr::knit_child(here("include", "header.Rmd"), envir = environment(), quiet = TRUE)
+cat(res, sep = '\n')
+
+```
+
+<!-- END OF FRONT MATTER -->
+
+
+# Overview
+
+This document performs a few preparatory steps in the analysis of bulk RNAseq data,
+including checking QC, expression levels of FOXR2 and other genes, and distribution of samples in the PCA space.
+
+For an external dataset of extra-cranial neuroblastomas, we load the raw counts, normalize the counts using DESeq2, and plot the samples in PCA space.
+
+# Libraries
+
+```{r libs, warning = FALSE, message = FALSE, echo = TRUE, cache = FALSE}
+
+library(here)
+library(magrittr)
+library(tidyr)
+library(dplyr)
+library(readr)
+library(readxl)
+library(glue)
+library(purrr)
+library(ggplot2)
+library(DESeq2)
+library(scales)
+library(cowplot)
+
+source(here("include/style.R"))
+source(here("code/functions/RNAseq.R"))
+
+ggplot2::theme_set(theme_min())
+
+
+```
+
+
+# Load metadata
+
+<div class="fold o">
+
+```{r read_meta, cache = FALSE}
+
+meta <- read_tsv(here("output/00/metadata_patients_NGS.tsv"))
+meta_bulk <- meta %>% filter(RNAseq == "Y")
+
+```
+
+</div>
+
+# In-house pediatric brain tumors
+
+```{r load_counts}
+
+info_samples <- read_tsv(here("data/RNAseq/pipeline_l3/2023-05-test_pbt/info.samples.tsv"))
+
+table(info_samples$Group)
+
+# load counts for FOXR2
+counts_foxr2 <- extract_pipeline_counts(path = here("data/RNAseq/pipeline_l3/2023-05-test_pbt/counts/Ensembl.ensGene.exon.norm.tsv.gz"),
+                                        goi = "FOXR2") %>% 
+    left_join(info_samples, by = c("sample" = "Nickname")) %>% 
+    mutate(Group = factor(Group, levels = names(palette_groups)))
+
+```
+
+## Counts
+
+```{r}
+
+counts_RNA <- read.table(here("data/RNAseq/pipeline_l3/2023-05-test_pbt/counts/Ensembl.ensGene.exon.raw.tsv.gz"),
+                         header = T, sep = "\t", check.names = FALSE) %>%
+    tibble::rownames_to_column(var = "ID") %>% 
+    separate(ID, into = c("ENSID", "symbol"), sep = ":") %>% 
+    arrange(ENSID) %>%
+    .[, c("ENSID", "symbol", info_samples$Nickname)] %T>%
+    rr_write_tsv(glue("{out}/TABLE_bulk_counts.tsv"),
+                 "Raw counts for bulk RNAseq data")
+
+```
+
+## QC
+
+Alignment stats:
+
+```{r align_stats, fig.width = 19, fig.height = 10}
+
+align_stats <- read_tsv(here("data/RNAseq/pipeline_l3/2023-05-test_pbt/alignment.statistics.tsv"))
+
+align_stats <- align_stats %>% 
+    left_join(info_samples, by = c("name" = "Nickname")) %>% 
+    separate(mitochondrialPercentage, sep = "%", into = "mitochondrialPercentage") %>%
+    separate(ribosomalPercentage,     sep = "%", into = "ribosomalPercentage") %>%
+    mutate(mitochondrialPercentage = as.numeric(mitochondrialPercentage),
+           ribosomalPercentage     = as.numeric(ribosomalPercentage))
+
+align_stats %>% 
+    select(name, group, cleanReadCount, mappedReadCount,
+           mitochondrialPercentage, ribosomalPercentage) %>% 
+    gather(stat, value, 3:6) %>%
+    mutate(group = factor(group, levels = names(palette_groups))) %>% 
+    arrange(desc(group)) %>% 
+    mutate(name = factor(name, levels = unique(.$name))) %>% 
+    ggplot(aes(x = name, y = value)) +
+    geom_bar(aes(fill = group), stat = "identity") +
+    scale_fill_manual(values = palette_groups) +
+    facet_wrap(~ stat, scales = "free_y", ncol = 1) +
+    rotate_x()
+
+```
+
+### TABLE: Human bulk QC
+
+Export a supplementary table for human bulk RNA-seq QC.
+
+```{r}
+
+align_stats %>% 
+    select(-ID, -group) %>% 
+    dplyr::rename(ID = name) %>% 
+    dplyr::relocate(Group, .after = 1) %>% 
+    rr_write_tsv(glue("{out}/TABLE_bulk_stats.tsv"),
+                 "QC stats for bulk RNAseq data")
+
+```
+
+## PCA
+
+```{r pbt_pca, fig.width = 6, fig.height = 5}
+
+# load the counts saved by the pipeline
+load(here("data/RNAseq/pipeline_l3/2023-05-test_pbt/.counts.RData"))
+
+# get highly-variable genes
+var_idx <- apply(counts$norm$Ensembl.ensGene.exon, 1, var) %>% 
+    order(decreasing = TRUE) %>% 
+    .[1:1000]
+
+pbt_counts_vst_hvg <- counts$vst$Ensembl.ensGene.exon[var_idx, ]
+
+pca       <- prcomp(t(pbt_counts_vst_hvg))
+variance  <- round(pca$sdev^2 / sum(pca$sdev^2), 3) * 100
+
+pca_df <- data.frame(Dim1 = pca$x[, 1],
+                     Dim2 = pca$x[, 2],
+                     Sample = colnames(pbt_counts_vst_hvg))
+
+p1 <- pca_df %>% 
+    left_join(meta_bulk, by = c("Sample" = "ID")) %>% 
+    ggplot(aes(x = Dim1, y = Dim2)) +
+    geom_point(aes(colour = Group), alpha = 0.7, size = 2) +
+    scale_color_manual(values = palette_groups) +
+    xlab(paste0("PC1 (", variance[1], "%)")) +
+    ylab(paste0("PC2 (", variance[2], "%)")) +
+    color_legend_ncol(2) +
+    ggtitle("PCA")
+
+p2 <- pca_df %>% 
+    left_join(meta_bulk, by = c("Sample" = "ID")) %>% 
+    ggplot(aes(x = Dim1, y = Dim2)) +
+    geom_point(aes(colour = Source), alpha = 0.7, size = 2) +
+    xlab(paste0("PC1 (", variance[1], "%)")) +
+    ylab(paste0("PC2 (", variance[2], "%)")) +
+    color_legend_ncol(2) +
+    ggtitle("PCA")
+
+```
+
+Coloured by QC stats:
+
+```{r pca_align_stats, fig.width = 22, fig.height = 10}
+
+pca_with_align_stats <- pca_df %>% 
+    left_join(info_samples, by = c("Sample" = "Nickname")) %>% 
+    left_join(align_stats, by = c("Sample" = "name", "Group" = "group"))
+
+pca_stat_plots <- list()
+
+stats <- c("cleanReadCount",
+           "mappedReadCount",
+           "exonReadCount",
+           "intronReadCount",
+           "mitochondrialPercentage",
+           "ribosomalPercentage")
+
+for (i in seq_along(stats)) {
+    
+    df <- pca_with_align_stats
+    df$stat <- df[, stats[i]]
+    
+    gg <- df %>% 
+        arrange(stat) %>% 
+        ggplot(aes(x = Dim1, y = Dim2)) +
+        geom_point(aes(colour = stat), alpha = 0.7, size = 2) +
+        scale_colour_viridis(labels = comma) +
+        xlab(paste0("PC1 (", variance[1], "%)")) +
+        ylab(paste0("PC2 (", variance[2], "%)")) +
+        ggtitle(stats[i])
+    
+    pca_stat_plots[[i]] <- gg
+    
+}
+
+plot_grid(plotlist = c(list(p1, p2), pca_stat_plots), align = "hv", axis = "rltb", ncol = 3)
+
+```
+
+## FOXR2 expression
+
+```{r boxplot_Foxr2, fig.width = 10, fig.height = 5}
+
+p1 <- counts_foxr2 %>%
+    ggplot(aes(x = Group, y = gene_expression)) +
+    geom_boxplot(aes(fill = Group), outlier.shape = NA) +
+    geom_jitter(size = 2, alpha = 0.8) +
+    scale_fill_manual(values = palette_groups)  +
+    ylab("Normalized expression") + xlab("Group") +
+    no_legend() + rotate_x() +
+    ggtitle("FOXR2 expression")
+
+p2 <- counts_foxr2 %>% 
+    filter(Group == "NB-FOXR2") %>% 
+    ggplot(aes(x = sample, y = gene_expression)) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    ggtitle("FOXR2 expression per sample")
+
+plot_grid(p1, p2, nrow = 1, align = "h", axis = "tb")
+
+```
+
+Check FOXR2 expression across samples:
+
+```{r foxr2_expression_all, fig.width = 22, fig.height = 6}
+
+counts_foxr2 %>% 
+    arrange(Group) %>% 
+    mutate(sample = factor(sample, levels = unique(.$sample))) %>% 
+    ggplot(aes(x = sample, y = gene_expression)) +
+    geom_bar(stat = "identity", aes(fill = Group)) +
+    scale_fill_manual(values = palette_groups) +
+    ggtitle("FOXR2 expression per sample") +
+    rotate_x()
+
+```
+
+## MDM4 expression
+
+The ubiquitous loss of chr1 in NB-FOXR2 may lead to overexpression of MDM2/MDM4, which phenocopies p53 loss in the tumor context ([Girish et al. *Science* 2023](https://pubmed.ncbi.nlm.nih.gov/37410869/)).
+
+Here, we investigate this possibility by comparing expression of MDM4 across the bulk intracranial tumor cohort.
+
+```{r mdm4_expression_all, fig.height=5, fig.width=8}
+
+# load counts for MDM genes
+counts_MDM <- extract_pipeline_counts(path = here("data/RNAseq/pipeline_l3/2023-05-test_pbt/counts/Ensembl.ensGene.exon.norm.tsv.gz"),
+                                        goi = c("MDM4")) %>% 
+    left_join(info_samples, by = c("sample" = "Nickname")) %>% 
+    mutate(Group = factor(Group, levels = names(palette_groups)))
+
+palette_highlight_nbfoxr2 <- rep("grey70", length(palette_groups))
+names(palette_highlight_nbfoxr2) <- names(palette_groups)
+palette_highlight_nbfoxr2[which(names(palette_highlight_nbfoxr2) == "NB-FOXR2")] <- "red"
+
+counts_MDM %>%
+    filter(gene_symbol == "MDM4") %>% 
+    ggplot(aes(x = Group, y = gene_expression, fill = Group)) +
+    geom_violin(scale = "width") +
+    scale_fill_manual(values = palette_highlight_nbfoxr2)  +
+    ylab("Normalized expression") + xlab("Group") +
+    no_legend() + rotate_x() +
+    ggtitle("MDM4 expression") +
+    stat_summary(fun.y=median, geom="crossbar", size=1, color="black", aes(width = 0.3))
+
+```
+
+# Extra-cranial neuroblastoma
+
+## Loading and data wrangling
+
+Load processed bulk RNAseq counts from [Gartlgruber et al, Nature Cancer, 2020](https://www.nature.com/articles/s43018-020-00145-w#Abs1).
+
+The data was downloaded via their shiny app (https://nbseb087.dkfz.de/project_NB_SE_viz/).
+
+```{r load_nb}
+
+gartlgruber_meta <- readRDS(here("data/RNAseq/external_data/Gartlgruber_NatCancer_2021/annotation_tumor_RNAseq.rds"))
+length(unique(gartlgruber_meta$ProjectID))
+
+# load annotation of ChIPseq data to look for overlapping samples
+gartlgruber_meta_chip <- readRDS(here("data/ChIPseq/external_data/Gartlgruber_NatCancer_2021/annotation_tumor_ChIPseq.rds"))
+gartlgruber_meta <- gartlgruber_meta %>% 
+    left_join(gartlgruber_meta_chip, by = c("ProjectID", "MYCN", "Stage",
+                                            "Age", "Risk", "Relapse"))
+
+gartlgruber_counts <- readRDS(here("data/RNAseq/external_data/Gartlgruber_NatCancer_2021/tumor_RNAseq_Counts_Matrix.rds"))
+dim(gartlgruber_counts)
+
+gartlgruber_counts[1:5, 1:5]
+
+```
+
+Normalize and reformat:
+
+```{r norm_nb}
+
+# normalize using DESeq2
+dds <- DESeqDataSetFromMatrix(countData = gartlgruber_counts,
+                              colData   = gartlgruber_meta,
+                              design    = ~ 1)
+dds <- DESeq(dds)
+ecnb_counts_norm <- counts(dds, normalized = TRUE)
+vsd  <- vst(dds)
+ecnb_counts_vst <- assay(vsd)
+
+```
+
+Convert to tidy format with metadata:
+
+```{r nb_tidy}
+
+ecnb_counts_tidy <- ecnb_counts_norm %>% 
+    as.data.frame() %>% 
+    tibble::rownames_to_column(var = "id") %>% 
+    separate(id, into = c("ens_id.x", "gene_symbol"), sep = "\\|") %>% 
+    separate(ens_id.x, into = c("ens_id", "drop"), sep = "\\.") %>% 
+    select(-drop) %>% 
+    gather(sample, gene_expression, 3:ncol(.)) %>% 
+    left_join(gartlgruber_meta, by = c("sample" = "ProjectID"))
+
+save(ecnb_counts_tidy, ecnb_counts_norm, ecnb_counts_vst, file = glue("{out}/Gartlgruber_et_al_counts.Rda"))
+
+```
+
+
+<!-- END MATTER, insert reproducibility info -->
+
+```{r footer, echo = FALSE, results = 'asis', warning = FALSE, cache = FALSE}
+
+# Knit child document with header
+res <- knitr::knit_child(here("include", "footer.Rmd"), envir = environment(), quiet = TRUE)
+cat(res, sep = '\n')
+
+```
+
+<!-- END OF END MATTER -->
