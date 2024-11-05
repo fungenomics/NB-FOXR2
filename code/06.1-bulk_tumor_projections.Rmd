@@ -649,9 +649,9 @@ scores_tidy %>% distinct(Sample, Group) %>% group_by(Group) %>% count()
 
 # Dimensionality reduction
 
-## Intracranial human tumors alone
+## Intracranial tumors alone
 
-In-house processed data for human tumors alone:
+In-house processed data for PBT alone:
 
 ```{r ssgsea_dimred_inhouse, fig.width = 20, fig.height = 6}
 
@@ -671,7 +671,7 @@ tsne_plot
 
 ## Intra + extracranial tumors
 
-PBT with Gartlgruber dataset High risk & Stage 4 EC-NB (samples with NA in either column are removed).
+PBT with Gartlgruber dataset High risk & Stage 4 EC-NB. (EC-NB samples with NA in either Risk or Stage metadata columns are removed.)
 
 Note that this dimensionality reduction tSNE plot does not exactly match the published figure, as the algorithm is stochastic, and a random seed was not set at the time of creating publication figure.
 
@@ -700,6 +700,7 @@ length(non_stage4_HR_ecnb)
 
 length(filter(meta_ecnb, !(ID %in% non_stage4_HR_ecnb))$ID)
 
+set.seed(100)
 tsne_calc <- scores_all %>%
                 select(c("Signature", test_samples, filter(meta_ecnb, !(ID %in% non_stage4_HR_ecnb))$ID)) %>% 
                  tibble::column_to_rownames(var = "Signature") %>% 

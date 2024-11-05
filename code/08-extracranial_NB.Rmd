@@ -101,13 +101,13 @@ Publication: [Gartlgruber et al. *Nature Cancer* 2021](https://pubmed.ncbi.nlm.n
 
 ### Load data
 
-Load raw counts and metadata. This data was downloaded from a 
-[public web app]((https://nbseb087.dkfz.de/project_NB_SE_viz/#shiny-tab-faq)) 
+This data was downloaded from a 
+[Shiny app]((https://nbseb087.dkfz.de/project_NB_SE_viz/#shiny-tab-faq)) 
 provided by the authors of the study.
 
-Data was provided as un-normalized ("raw") bulk counts and per-tumor metadata.
+Data was provided as un-normalized bulk counts and per-tumor metadata.
 
-Load DESeq normalized counts produced in in R markdown document 03, for plotting
+Load DESeq normalized counts produced in in R markdown document `03` for plotting
 gene expression.
 
 ```{r load-norm-counts}
@@ -118,7 +118,6 @@ rm(ecnb_counts_norm)
 rm(ecnb_counts_vst)
 
 ```
-
 
 ### Add FOXR2 positivity to metadata
 
@@ -232,8 +231,7 @@ target_meta_foxr2 <- target_counts_tidy %>%
 
 ## Gartlgruber et al. 2021
 
-Stage 4, high-risk tumors only
-FOXR2 threshold: DESEq normalized value "2".
+Stage 4, high-risk tumors only. (Samples with NA in either Risk or Stage metadata columns are removed.)
 
 ```{r FOXR2-coexp-ECNB, fig.height=4, fig.width=24}
 

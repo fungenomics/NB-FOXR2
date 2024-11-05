@@ -1,7 +1,7 @@
 ---
 title: "09 - FOXR2 CUT&RUN in FOXR2 p53LOF mouse models"
 author: "Bhavyaa Chandarana [[bhavyaa.chandarana@mail.mcgill.ca](mailto:bhavyaa.chandarana@mail.mcgill.ca)] and Steven Hébert [[steven.hebert@ladydavis.ca](mailto:steven.hebert@ladydavis.ca)]"
-date: "04 November, 2024"
+date: "05 November, 2024"
 output:
   html_document:
     self_contained: yes
@@ -128,7 +128,7 @@ FOXR2-V5 CUT&RUN (similar to ChIP) was run with two protocols "native" and "X-li
 with n=2 replicates each. 
 
 A FOXR2-V5 experiment was also run in a cell line lacking V5-tagged insertion (n=2 
-replicates) which we use here to filter false positive peaks.
+replicates). We also load it here to use as a control.
 
 
 ```r
@@ -271,14 +271,22 @@ system(glue("sort -Vk1,1 -k2,2 -k3,3 {out}/blacklist_mm10.tsv |
                sed 's/ /_/g' > {out}/blacklist_mm10.bed"))
 
 # Remove non-standard chromosomes
-Foxr2_p53_r1_ATAC_peaks <- standard_chrom_mm(Foxr2_p53_r1_ATAC_peaks)
+Foxr2_p53_r1_ATAC_peaks <- standard_chrom_mm(Foxr2_p53_r1_ATAC_peaks) 
+```
 
-### Check number of peaks overlapping without any filtering
+Plot number of peaks overlapping between CUT&RUN replicates 
+and ATAC without any filtering:
+
+
+```r
 peak_list <- c(chip_foxr2_peak_list_no_V5, FOXR2_ATAC = Foxr2_p53_r1_ATAC_peaks)
 venn_from_gr_list(peak_list, "venn_ChIP_ATAC_nofilter")
 ```
 
-![](/project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/figures/09//compare-chip-atac-1.png)<!-- -->
+![](/project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/figures/09//venn-overlap-1.png)<!-- -->
+
+Filter CUT&RUN and ATAC peaks by quality metrics:
+
 
 ```r
 # Add width column to the peaks
@@ -288,12 +296,7 @@ chip_foxr2_peak_list_no_V5 <- map(chip_foxr2_peak_list_no_V5, ~ {
 })
 
 Foxr2_p53_r1_ATAC_peaks$width <- width(Foxr2_p53_r1_ATAC_peaks)
-```
 
-Filter CUT&RUN and ATAC peaks by quality metrics:
-
-
-```r
 # Filter peaks of ChIP-seq and ATAC-seq
 # Peaks from ChIP-seq and ATAC-seq have different value distribution 
 # (signalValue, qValue), so different thresholds need to be used.
@@ -302,13 +305,21 @@ filtered_2_chip_foxr2_peak_list_no_V5 <- map(chip_foxr2_peak_list_no_V5,
 filtered_2_Foxr2_p53_r1_ATAC_peaks <- Foxr2_p53_r1_ATAC_peaks[Foxr2_p53_r1_ATAC_peaks$qValue > 4 &
                                                             Foxr2_p53_r1_ATAC_peaks$signalValue > 2 &
                                                             Foxr2_p53_r1_ATAC_peaks$width < 10000,]
+```
 
+Plot number of peaks overlapping between CUT&RUN replicates 
+and ATAC after filtering.
+
+This plot was adapted in Adobe Illustrator for the publication.
+
+
+```r
 ### Check number of peaks overlapping
 filtered_2_peak_list <- c(filtered_2_chip_foxr2_peak_list_no_V5, FOXR2_ATAC = filtered_2_Foxr2_p53_r1_ATAC_peaks)
 venn_from_gr_list(filtered_2_peak_list, "venn_ChIP_ATAC_filtered_stringent")
 ```
 
-![](/project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/figures/09//filter-chip-atac-1.png)<!-- -->
+![](/project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/figures/09//venn-overlap-filtered-1.png)<!-- -->
 
 ```r
 # export the peaks into bed files
@@ -333,7 +344,8 @@ export.bed(filtered_2_peak_list[[3]],
          format = "bed")
 ```
 
-Take the intersecting peaks between the n=2 FOXR2 CUT&RUN and ATAC:
+Get a bed file with intersecting peaks between the n=2 FOXR2 CUT&RUN 
+and ATAC, for IGV:
 
 
 ```r
@@ -452,7 +464,7 @@ nrow(filter(motifs_adj, padj_BH < 0.05))
 ```
 
 Plot the top motifs and their -log10 adjusted p-value, coloring by the motif type
-(ETS, SOX, other)
+(ETS, SOX, other):
 
 
 ```r
@@ -478,7 +490,7 @@ motifs_gg %>%
 ![](/project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/figures/09//plot-motifs-1.png)<!-- -->
 
 Reorder the bars to group the motif types together, and rank by adjusted p-value
-within each of the groups.
+within each of the groups. This is the final plot used in the publication.
 
 
 ```r
@@ -517,7 +529,7 @@ motifs_gg %>%
 This document was last rendered on:
 
 ```
-## 2024-11-04 12:26:35
+## 2024-11-05 11:04:56
 ```
 
 The git repository and last commit:
@@ -525,7 +537,7 @@ The git repository and last commit:
 ```
 ## Local:    main /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public
 ## Remote:   main @ origin (https://github.com/fungenomics/NB-FOXR2.git)
-## Head:     [0e89693] 2024-09-12: Initial commit
+## Head:     [72d1c5c] 2024-11-04: Add DOI badge
 ```
 
 The random seed was set with `set.seed(100)`
@@ -544,7 +556,7 @@ The R session info:
 ##  collate  en_US.UTF-8
 ##  ctype    en_US.UTF-8
 ##  tz       America/Toronto
-##  date     2024-11-04
+##  date     2024-11-05
 ##  pandoc   1.19.2.1 @ /cvmfs/soft.computecanada.ca/gentoo/2020/usr/bin/ (via rmarkdown)
 ## 
 ## ─ Packages ───────────────────────────────────────────────────────────────────

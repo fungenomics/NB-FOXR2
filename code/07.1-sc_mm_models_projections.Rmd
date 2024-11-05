@@ -186,6 +186,9 @@ palette_broad_type <- c("Neuron" = "blue4",
 
 ## Jessa forebrain
 
+Load the cell type ontology (grouping into higher cell classes) and color palette
+used in the Jessa 2022 publication.
+
 ```{r load-onto-palette-jessa, cache = T}
 
 # Jessa forebrain 
@@ -250,7 +253,7 @@ jessa_broad <- ontology_jessa %>%
 
 ### TABLE: Jessa reference ontology
 
-For methods section, save a table for ontology in Jessa atlas:
+Here, we export a supplementary table for the cell type ontology used in the Jessa atlas:
 
 1. Original cluster label
 2. Label used in figures
@@ -288,6 +291,8 @@ Guide to acronyms used in cell class labels:
 * Oligo = Oligodendrocytes
 * OEC = Olfactory ensheathing cells (a type of cortical glia)
 
+Load the class and subclass level cell type ontology from the Yao atlas publication,
+and define a color palette for plotting cell types:
 
 ```{r load-onto-palette-yao, cache = T}
 
@@ -363,47 +368,7 @@ yao_broad <- yao_broad %>%
 
 ```
 
-Set mapping for Yao labels to a more legible written / full form, and define equivalent palette
-
-```{r set-yao-legible}
-
-yao_broad <- yao_broad %>% 
-    
-    mutate(Yao_legible = 
-               case_when(Label %in% c("01 IT-ET Glut",
-                                      "02 NP-CT-L6b Glut",
-                                      "03 OB-CR Glut")     ~ "Cortical excitatory neurons",
-                         Label %in% c("04 DG-IMN Glut")    ~ "Excitatory IPC",
-                         Label %in% c("05 OB-IMN GABA")    ~ "Inhibitory IPC",
-                         Label %in% c("06 CTX-CGE GABA")   ~ "CGE inhibitory neurons",
-                         Label %in% c("07 CTX-MGE GABA",
-                                      "08 CNU-MGE GABA")   ~ "MGE inhibitory neurons",
-                         Label %in% c("09 CNU-LGE GABA")   ~ "LGE inhibitory neurons",
-                         Label %in% c("10 LSX GABA")       ~ "Other inhibitory neurons",
-                         Label %in% c("11 CNU-HYa GABA",
-                                      "12 HY GABA")        ~ "Hypothalamic inhibitory neurons",
-                         Label %in% c("13 CNU-HYa Glut",
-                                      "14 HY Glut")        ~ "Hypothalamic excitatory neurons",
-                         Label %in% c("18 TH Glut")        ~ "Thalamic excitatory neurons",
-                         
-                         Label %in% c("30 Astro-Epen")     ~ "Astrocytes & ependymal cells",
-                         Label %in% c("31 OPC-Oligo")      ~ "OPC & oligodendrocytes",
-                         Label %in% c("32 OEC")            ~ "Other glia",
-                         
-                         Label %in% c("33 Vascular",
-                                      "34 Immune")     ~ "Vascular & immune",
-                         
-                         Label %in% c("No consensus",
-                                      "Unresolved")    ~ "No consensus",
-                         
-                         TRUE                          ~ as.character(NA)
-                         
-                         )
-               )
-
-```
-
-Set GE-derived neurons within Yao labels
+Identify the GE-derived neuron types within Yao atlas labels.
 
 ```{r set-ge-derived-neurons-yao}
 
@@ -448,7 +413,7 @@ yao_broad <- yao_broad %>%
 
 ### TABLE: Yao reference ontology
 
-For methods section, save a table for ontology in Yao 2023 atlas:
+Here, we export a supplementary table for the cell type ontology used in Yao 2023 atlas:
 
 1. Original cluster label
 2. Label used in figures
@@ -458,8 +423,7 @@ For methods section, save a table for ontology in Yao 2023 atlas:
 ```{r save-ref-ontology-table-yao}
 
 yao_onto <- ontology_yao %>% 
-    left_join(., yao_broad, by = c("class_label" = "Label")) %>% 
-    select(-Yao_legible)
+    left_join(., yao_broad, by = c("class_label" = "Label"))
 
 rr_write_tsv(df = yao_onto, path = glue("{out}/yao_reference_labels.tsv"),
              desc = "Levels of labels used for Yao 2023 atlas")
@@ -776,7 +740,8 @@ Tools run through CoRAL:
 
 ## Jessa forebrain
 
-Get the consensus annotations using the cell class ontology, and add to the Seurat object.
+Here, we use a custom function `get_consensus_labels` (in `code/functions/scRNAseq.R`) 
+to produce a consensus using broader class labels.
 
 ```{r load_anno_jessa_forebrain, fig.width = 7, fig.height = 6, message = TRUE, cache = F}
 
@@ -798,7 +763,7 @@ seurat_mouse <- imap(seurat_mouse, function(seurat, alias) {
 
 ```
 
-Summarize majority to broad annotation (Neuron/Glia/Other) as per ontology in Section 3.3:
+Summarize these labels further to broad annotation (Neuron/Glia/Other) as per ontology in section `5.2`:
 
 ```{r summarize_jessa_forebrain}
 
@@ -825,7 +790,7 @@ seurat_mouse <- map(seurat_mouse,
 
 ```
 
-Transfer cell type annotation columns to seurat_joint.
+Transfer cell type annotation columns to joint object:
 
 ```{r anno-joint-jessa}
 
@@ -856,6 +821,9 @@ seurat_joint <- AddMetaData(seurat_joint, joint_anno)
 
 ## Yao forebrain
 
+Here, we use a custom function `get_consensus_labels` (in `code/functions/scRNAseq.R`) 
+to produce a consensus using broader class labels.
+
 ```{r load_anno_yao_forebrain, message = TRUE, cache = F}
 
 ontology_yao <- ontology_yao %>% 
@@ -881,7 +849,7 @@ seurat_mouse <- imap(seurat_mouse, function(seurat, alias) {
 
 ```
 
-Summarize to broad annotation (Neuron/Glia/Other) as per ontology in Section 3.3:
+Summarize these labels further to broad annotation (Neuron/Glia/Other) as per ontology in section `5.3`:
 
 ```{r summarize_yao_forebrain}
 
@@ -940,15 +908,16 @@ seurat_joint <- AddMetaData(seurat_joint, joint_anno)
 
 In order to distinguish tumor and normal cells, we first generate a reference of
 normal cells based on cell type annotation as Immune, or equivalently low
-FOXR2 expression. 
+FOXR2 expression (section `8.1`).
 
-Once these normal reference cells have been established, we run inferCNV to 
-detect CNVs within this reference (running this set of cells as the reference
-and the query at the same time) and remove cells with CNV.
+We then run inferCNV to detect CNVs within this reference, running this set of cells 
+as both the reference and the query at the same time, and remove cells with visible CNV 
+(section `8.2.1`).
 
-Finally, we use this cleaned reference in combination with cells from WT cortex 
+Finally, we combine this reference with cells from wild-type adult mouse cortex 
 Multiome profiling ([Khazaei et al. _Cell_ 2023](https://pubmed.ncbi.nlm.nih.gov/36931244/)) 
-to call tumor vs. normal cells in the full mouse samples.
+to call tumor vs. normal cells in the full mouse samples (section `8.2.2`) and add this 
+annotation to Seurat objects (section `8.2.3`).
 
 ## By FOXR2 expression {.tabset}
 
@@ -1261,12 +1230,10 @@ plot_tumor_normal <- function(seurat, alias) {
 
 ```
 
+To avoid re-running this time and memory intensive function, add in the pre-computed 
+Tumor-normal calls into each Seurat object from saved metadata:
 
-</details>
-
-### Foxr2_p53_r1
-
-```{r call_normal_seurat_Foxr2_p53_r1_run, fig.width = 5, fig.height = 4, message = FALSE, results = "hide"}
+```{r}
 
 load(glue("{out}/seurat_mouse_metadata.Rda"))
 
@@ -1281,9 +1248,17 @@ seurat_mouse <- map2(seurat_mouse, seurat_mouse_metadata,
         return(seurat)
     })
 
-# seurat_mouse$Foxr2_p53_r1 <- call_tumor_normal(seurat = seurat_mouse$Foxr2_p53_r1,
-#                                                out_prefix = "Foxr2_p53_r1",
-#                                                baseline = "Immune")
+```
+
+</details>
+
+### Foxr2_p53_r1
+
+```{r call_normal_seurat_Foxr2_p53_r1_run, fig.width = 5, fig.height = 4, message = FALSE, eval = FALSE}
+
+seurat_mouse$Foxr2_p53_r1 <- call_tumor_normal(seurat = seurat_mouse$Foxr2_p53_r1,
+                                               out_prefix = "Foxr2_p53_r1",
+                                               baseline = "Immune")
 
 ```
 
@@ -1296,16 +1271,11 @@ plot_diagnostics(read_tsv(here(glue("{out}/Foxr2_p53_r1_tumornormal_diagnostics.
 
 ### Foxr2_r1
 
-```{r call_normal_seurat_Foxr2_r1_run, fig.width = 5, fig.height = 4, message = FALSE, results = "hide"}
+```{r call_normal_seurat_Foxr2_r1_run, fig.width = 5, fig.height = 4, message = FALSE, eval = FALSE}
 
-
-# seurat_mouse[["Foxr2_r1"]] <- AddMetaData(seurat_mouse[["Foxr2_r1"]],
-#                                               seurat_mouse_metadata[["Foxr2_r1"]] %>% 
-#                                                   select(Tumor_normal_FOXR2_call))
-
-# seurat_mouse$Foxr2_r1 <- call_tumor_normal(seurat = seurat_mouse$Foxr2_r1,
-#                                            out_prefix = "Foxr2_r1",
-#                                            baseline = "Immune")
+seurat_mouse$Foxr2_r1 <- call_tumor_normal(seurat = seurat_mouse$Foxr2_r1,
+                                           out_prefix = "Foxr2_r1",
+                                           baseline = "Immune")
 
 
 ```
@@ -1319,15 +1289,11 @@ plot_diagnostics(read_tsv(here(glue("{out}/Foxr2_r1_tumornormal_diagnostics.tsv"
 
 ### Foxr2_r2
 
-```{r call_normal_seurat_Foxr2_r2_run, fig.width = 5, fig.height = 4, message = FALSE, results = "hide"}
+```{r call_normal_seurat_Foxr2_r2_run, fig.width = 5, fig.height = 4, message = FALSE, eval = FALSE}
 
-# seurat_mouse[["Foxr2_r2"]] <- AddMetaData(seurat_mouse[["Foxr2_r2"]],
-#                                               seurat_mouse_metadata[["Foxr2_r2"]] %>% 
-#                                                   select(gex_barcode, Tumor_normal_FOXR2_call))
-
-# seurat_mouse$Foxr2_r2 <- call_tumor_normal(seurat = seurat_mouse$Foxr2_r2,
-#                                            out_prefix = "Foxr2_r2",
-#                                            baseline = "Immune")
+seurat_mouse$Foxr2_r2 <- call_tumor_normal(seurat = seurat_mouse$Foxr2_r2,
+                                           out_prefix = "Foxr2_r2",
+                                           baseline = "Immune")
 
 ```
 
@@ -1366,22 +1332,19 @@ imap(inferCNV_ref_no_doublets,
 
 ### Clean reference
 
-The Foxr2 expression threshold for determining normal cells may be a bit too strict. 
-If some malignant cells have lost Foxr2 expression, we will end up calling too few
-malignant cells.
+We will use the Foxr2 negative cells identified in the previous section, concatenated with
+wildtype P7 cortex (scMultiome sample "6" from Khazaei et al. *Cell* 2023) to avoid
+cell type specific & artefactual results.
 
-Therefore, we will use these Foxr2 negative cells (identified in the previous section) as
-a reference for inferCNV.
-
-However, there are some CNV-like signals within this reference, which are cells that
-were likely incorrectly labeled as normal, when they are malignant.
-
-We remove cells that are clustering as malignant within the reference.
+We run inferCNV on this set of cells, as both reference and query at the same time, 
+and remove clusters of cells with CNV-like signals.
 
 Code for extracting cells adapted from:
 ```
 code/scripts/per_sample_script_examples/infer_cnv_call.Rmd
 ```
+
+<details>
 
 ```{r inferCNV-wrappers}
 
@@ -1433,6 +1396,8 @@ plot_subtrees <- function(dir_path, k, palette = NULL) {
 
 ```
 
+</details>
+
 Show inferCNV results:
 
 ![](/project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public/data/singlecell/mm_inferCNV/normVSnorm_InferCNV/inferCNV/window101_exp0.1_refmanav_foxr2_normal_cleaned_6_WT_P7_cortex_chrFixed_HMMnone_denoise/infercnv.png)
@@ -1440,8 +1405,7 @@ Show inferCNV results:
 If we split the clustering into two subtrees, the bottom one contains the malignant cells with CNV. 
 This tree is subdendrogram #1 when doing clustering with $k = 2$, and is colored pink below.
 
-Saving the barcodes of the *remaining cells* (top / turquoise subtree, subdendrogram #2) for 
-Steven to use as a cleaned reference of normal cells.
+Saving the barcodes of the *remaining cells* (top / turquoise subtree, subdendrogram #2) to use as a cleaned reference of normal cells.
 
 ```{r save-norm-cells-ref-inferCNV}
 
@@ -1458,11 +1422,9 @@ write_tsv(x = norm_barcodes_ref %>% as.data.frame(),
 
 ### Get malignant cells per sample {.tabset}
 
-Steven ran inferCNV on each sample using this cleaned reference, concatenated with
-wildtype P7 cortex (scMultiome sample "6" from Khazaei et al. *Cell* 2023) to avoid
-cell type specific & artefactual results.
+We ran inferCNV individually in each sample using this cleaned reference.
 
-Loading the inferCNV results and calling tumor/normal cells based on these results.
+Loading the inferCNV results and calling tumor/normal cells based on the heatmaps.
 
 #### Foxr2_p53_r1 (AN24377)
 
@@ -1485,7 +1447,6 @@ After cutting the tree at $k = 3$, cells in subtrees #2 (middle) is normal.
 Others (subtrees #1 and #3) are Malignant.
 
 Extracting the malignant cell barcodes and saving them.
-Also creating and saving a dataframe labeling each cell with its inferCNV subcluster.
 
 ```{r separate-mal-barcodes-Foxr2_p53_r1, cache = F}
 
@@ -1707,7 +1668,7 @@ seurat_joint <- AddMetaData(seurat_joint, joint_mal_norm)
 
 ```
 
-Also add metadata for malignant cells per each sample
+Also add metadata for malignant cells per each sample:
 
 ```{r add-mal-cells-per-sample}
 
@@ -2226,7 +2187,6 @@ Using all this information we can assign final labels as follows:
 2. For remaining cells, use cell type projection from the Jessa atlas
 3. For cells called as neurons by Jessa atlas, relabel with cell type projection from Yao atlas
 4. Label as "No consensus" any cells that are labeled as neurons in Jessa and non-neurons in Yao
-5. Finally, split all singlets into tumor/normal via inferCNV calls
 
 This way, we combine both references based on their strengths in sampling cell types.
 

@@ -10,6 +10,9 @@ mkdir -p logs/
 module load StdEnv/2020
 module load r/4.1.2
 
+# for manipulation of peaks in Rmd 09
+module load bedtools/2.30.0
+
 # get current resources requested
 RESOURCES=`grep -E '^#SBATCH' run_hydra.sh | grep -v 'job-name' | grep -v 'account' | grep -v 'output'`
 

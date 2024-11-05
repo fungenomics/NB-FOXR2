@@ -44,7 +44,7 @@ using single-cell RNAseq data.
 Here, we will load and inspect cell type projections for single-cell NB-FOXR2 
 data. These projections were run with developing mouse forebrain as a reference atlas.
 
-Projection was performed with CoRAL (v3.0.0, https://github.com/fungenomics/CoRAL).
+Projection was performed with CoRAL (v3.0.0, https://github.com/fungenomics/CoRAL/releases/tag/v3.0.0).
 
 # Libraries & functions
 
@@ -181,7 +181,7 @@ Here, we load cell type categories and color palettes related to the developing
 murine brain atlas used as normal reference for this analysis, published in
 [Jessa et al *Nature Genetics* 2022](https://pubmed.ncbi.nlm.nih.gov/36471070/).
 
-Since NB-FOXR2 are supratentorial tumors, we will only annotate cell types using forebrain reference (hindbrain data will be excluded)."
+Since NB-FOXR2 are supratentorial tumors, we will only annotate cell types using forebrain reference (hindbrain data will be excluded).
 
 Load the color palettes and cell type ontology for this reference.
 
@@ -251,8 +251,11 @@ jessa_broad <- ontology_jessa %>%
 
 # Load cell type annotation
 
-Load the annotation labels output from [CoRAL v3.0.0](https://github.com/fungenomics/CoRAL) 
+Load the annotation labels output from CoRAL v3.0.0 (https://github.com/fungenomics/CoRAL/releases/tag/v3.0.0)
 run with developing mouse forebrain atlas as reference. 
+
+Here, we use a custom function `get_consensus_labels` (in `code/functions/scRNAseq.R`) 
+to produce a consensus using broader class labels.
 
 ```{r load_labels_jessa, message = FALSE, results = "hide", cache = F}
 
@@ -279,10 +282,7 @@ samples_sc <- imap(samples_sc, function(seurat, alias) {
 
 ```
 
-Summarize to broad annotation (Neuron/Glia/Other) as per ontology in Section 3.
-
-Here, we use a custom function `get_consensus_labels` (in `code/functions/scRNAseq.R`) 
-to produce a consensus using broader class labels.
+Summarize these labels further to broad annotation (Neuron/Glia/Other) as per ontology in section `5`.
 
 ```{r summarize_jessa_forebrain}
 
@@ -337,8 +337,7 @@ seurat_joint <- AddMetaData(seurat_joint, joint_anno)
 
 # Plot cell type annotation
 
-Here, we compare consensus cell type annotations produced through majority vote 
-across tools.
+Here, we visualize consensus cell type annotations produced through CoRAL (majority vote).
 
 Define helper functions:
 

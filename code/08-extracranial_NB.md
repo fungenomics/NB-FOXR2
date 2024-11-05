@@ -1,7 +1,7 @@
 ---
 title: "08 - Extracranial neuroblastoma"
 author: "Selin Jessa [[selin.jessa@mail.mcgill.ca](mailto:selin.jessa@mail.mcgill.ca)] and Bhavyaa Chandarana [[bhavyaa.chandarana@mail.mcgill.ca](mailto:bhavyaa.chandarana@mail.mcgill.ca)]"
-date: "01 November, 2024"
+date: "05 November, 2024"
 output:
   html_document:
     keep_md: yes
@@ -145,13 +145,13 @@ Publication: [Gartlgruber et al. *Nature Cancer* 2021](https://pubmed.ncbi.nlm.n
 
 ### Load data
 
-Load raw counts and metadata. This data was downloaded from a 
-[public web app]((https://nbseb087.dkfz.de/project_NB_SE_viz/#shiny-tab-faq)) 
+This data was downloaded from a 
+[Shiny app]((https://nbseb087.dkfz.de/project_NB_SE_viz/#shiny-tab-faq)) 
 provided by the authors of the study.
 
-Data was provided as un-normalized ("raw") bulk counts and per-tumor metadata.
+Data was provided as un-normalized bulk counts and per-tumor metadata.
 
-Load DESeq normalized counts produced in in R markdown document 03, for plotting
+Load DESeq normalized counts produced in in R markdown document `03` for plotting
 gene expression.
 
 
@@ -161,7 +161,6 @@ load(here("output/03/Gartlgruber_et_al_counts.Rda"))
 rm(ecnb_counts_norm)
 rm(ecnb_counts_vst)
 ```
-
 
 ### Add FOXR2 positivity to metadata
 
@@ -293,8 +292,7 @@ target_meta_foxr2 <- target_counts_tidy %>%
 
 ## Gartlgruber et al. 2021
 
-Stage 4, high-risk tumors only
-FOXR2 threshold: DESEq normalized value "2".
+Stage 4, high-risk tumors only. (Samples with NA in either Risk or Stage metadata columns are removed.)
 
 
 ```r
@@ -628,7 +626,7 @@ cowplot::plot_grid(dlx5_scatter, dlx5_vln,
 This document was last rendered on:
 
 ```
-## 2024-11-01 14:16:53
+## 2024-11-05 10:34:07
 ```
 
 The git repository and last commit:
@@ -636,7 +634,7 @@ The git repository and last commit:
 ```
 ## Local:    main /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public
 ## Remote:   main @ origin (https://github.com/fungenomics/NB-FOXR2.git)
-## Head:     [0e89693] 2024-09-12: Initial commit
+## Head:     [72d1c5c] 2024-11-04: Add DOI badge
 ```
 
 The random seed was set with `set.seed(100)`
@@ -655,7 +653,7 @@ The R session info:
 ##  collate  en_US.UTF-8
 ##  ctype    en_US.UTF-8
 ##  tz       America/Toronto
-##  date     2024-11-01
+##  date     2024-11-05
 ##  pandoc   1.19.2.1 @ /cvmfs/soft.computecanada.ca/gentoo/2020/usr/bin/ (via rmarkdown)
 ## 
 ## ─ Packages ───────────────────────────────────────────────────────────────────

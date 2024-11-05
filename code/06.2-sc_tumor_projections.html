@@ -184,7 +184,7 @@ pre code {
 
 <h1 class="title toc-ignore">06.2 - Project single-cell tumors to normal developing brain</h1>
 <h4 class="author">Selin Jessa [<a href="mailto:selin.jessa@mail.mcgill.ca">selin.jessa@mail.mcgill.ca</a>] and Bhavyaa Chandarana [<a href="mailto:bhavyaa.chandarana@mail.mcgill.ca">bhavyaa.chandarana@mail.mcgill.ca</a>]</h4>
-<h4 class="date">04 November, 2024</h4>
+<h4 class="date">05 November, 2024</h4>
 
 </div>
 
@@ -246,7 +246,7 @@ cache      &lt;- paste0(&quot;/project/kleinman/bhavyaa.chandarana/cache/NB-FOXR
 <h1><span class="header-section-number">2</span> Overview</h1>
 <p>This document explores projections/mapping of NB-FOXR2 tumors to normal normal development using single-cell RNAseq data.</p>
 <p>Here, we will load and inspect cell type projections for single-cell NB-FOXR2 data. These projections were run with developing mouse forebrain as a reference atlas.</p>
-<p>Projection was performed with CoRAL (v3.0.0, <a href="https://github.com/fungenomics/CoRAL" class="uri">https://github.com/fungenomics/CoRAL</a>).</p>
+<p>Projection was performed with CoRAL (v3.0.0, <a href="https://github.com/fungenomics/CoRAL/releases/tag/v3.0.0" class="uri">https://github.com/fungenomics/CoRAL/releases/tag/v3.0.0</a>).</p>
 </div>
 <div id="libraries-functions" class="section level1">
 <h1><span class="header-section-number">3</span> Libraries &amp; functions</h1>
@@ -372,7 +372,7 @@ map(samples_sc, ncol) %&gt;% unname() %&gt;% as.numeric() %&gt;% sum() == ncol(s
 <div id="load-reference-information" class="section level1">
 <h1><span class="header-section-number">5</span> Load reference information</h1>
 <p>Here, we load cell type categories and color palettes related to the developing murine brain atlas used as normal reference for this analysis, published in <a href="https://pubmed.ncbi.nlm.nih.gov/36471070/">Jessa et al <em>Nature Genetics</em> 2022</a>.</p>
-<p>Since NB-FOXR2 are supratentorial tumors, we will only annotate cell types using forebrain reference (hindbrain data will be excluded).&quot;</p>
+<p>Since NB-FOXR2 are supratentorial tumors, we will only annotate cell types using forebrain reference (hindbrain data will be excluded).</p>
 <p>Load the color palettes and cell type ontology for this reference.</p>
 <pre class="r"><code># General broad palette
 palette_broad_type &lt;- c(&quot;Neuron&quot; = &quot;blue4&quot;,
@@ -430,7 +430,8 @@ palette_jessa_l3 &lt;- c(palette_jessa_l3, &quot;No consensus&quot; = &quot;gray
 </div>
 <div id="load-cell-type-annotation" class="section level1">
 <h1><span class="header-section-number">6</span> Load cell type annotation</h1>
-<p>Load the annotation labels output from <a href="https://github.com/fungenomics/CoRAL">CoRAL v3.0.0</a> run with developing mouse forebrain atlas as reference.</p>
+<p>Load the annotation labels output from CoRAL v3.0.0 (<a href="https://github.com/fungenomics/CoRAL/releases/tag/v3.0.0" class="uri">https://github.com/fungenomics/CoRAL/releases/tag/v3.0.0</a>) run with developing mouse forebrain atlas as reference.</p>
+<p>Here, we use a custom function <code>get_consensus_labels</code> (in <code>code/functions/scRNAseq.R</code>) to produce a consensus using broader class labels.</p>
 <pre class="r"><code># Get consensus annotations in individual Seurat objects and add to each metadata
 
 # Calculate majority vote consensus outside of CoRAL
@@ -450,8 +451,7 @@ samples_sc &lt;- imap(samples_sc, function(seurat, alias) {
     seurat &lt;- AddMetaData(seurat, labels)
 
 })</code></pre>
-<p>Summarize to broad annotation (Neuron/Glia/Other) as per ontology in Section 3.</p>
-<p>Here, we use a custom function <code>get_consensus_labels</code> (in <code>code/functions/scRNAseq.R</code>) to produce a consensus using broader class labels.</p>
+<p>Summarize these labels further to broad annotation (Neuron/Glia/Other) as per ontology in section <code>5</code>.</p>
 <pre class="r"><code>samples_sc &lt;- map(samples_sc,
                     function(seurat){
                         
@@ -494,7 +494,7 @@ seurat_joint &lt;- AddMetaData(seurat_joint, joint_anno)</code></pre>
 </div>
 <div id="plot-cell-type-annotation" class="section level1">
 <h1><span class="header-section-number">7</span> Plot cell type annotation</h1>
-<p>Here, we compare consensus cell type annotations produced through majority vote across tools.</p>
+<p>Here, we visualize consensus cell type annotations produced through CoRAL (majority vote).</p>
 <p>Define helper functions:</p>
 <p><details></p>
 <p>Define a function for bar plot of distribution of cell type annotation in malignant cells.</p>
@@ -832,11 +832,11 @@ seurat_joint@meta.data &lt;- seurat_tumor_metadata_joint %&gt;%
 <div id="reproducibility" class="section level1">
 <h1><span class="header-section-number">11</span> Reproducibility</h1>
 <p>This document was last rendered on:</p>
-<pre><code>## 2024-11-04 11:56:36</code></pre>
+<pre><code>## 2024-11-05 10:54:19</code></pre>
 <p>The git repository and last commit:</p>
 <pre><code>## Local:    main /project/kleinman/bhavyaa.chandarana/from_hydra/2023-05-NB-FOXR2/public
 ## Remote:   main @ origin (https://github.com/fungenomics/NB-FOXR2.git)
-## Head:     [0e89693] 2024-09-12: Initial commit</code></pre>
+## Head:     [72d1c5c] 2024-11-04: Add DOI badge</code></pre>
 <p>The random seed was set with <code>set.seed(100)</code></p>
 <p>The R session info: <details></p>
 <pre><code>## ─ Session info ───────────────────────────────────────────────────────────────
@@ -849,7 +849,7 @@ seurat_joint@meta.data &lt;- seurat_tumor_metadata_joint %&gt;%
 ##  collate  en_US.UTF-8
 ##  ctype    en_US.UTF-8
 ##  tz       America/Toronto
-##  date     2024-11-04
+##  date     2024-11-05
 ##  pandoc   1.19.2.1 @ /cvmfs/soft.computecanada.ca/gentoo/2020/usr/bin/ (via rmarkdown)
 ## 
 ## ─ Packages ───────────────────────────────────────────────────────────────────

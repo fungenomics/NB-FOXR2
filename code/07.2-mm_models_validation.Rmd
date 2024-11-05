@@ -89,8 +89,7 @@ conflicted::conflicts_prefer(graphics::layout)
 
 ```
 
-Functions to convert genes from hg to mm (functions adapted from bulk pipeline by Steven, 
-further adapted by me):
+Functions to convert genes from hg to mm. Functions were adapted from in-house bulk pipeline by Steven Hébert.
 
 <details>
 
@@ -491,7 +490,7 @@ We color here in red the 100 genes that appear in the final consensus signature 
 NB-FOXR2 across comparisons.
 
 Define function to plot volcano plots with highlighted genes 
-(modified from a function from Alva Annett).
+(modified from a function by Alva Annett).
 
 <details>
 
@@ -1026,14 +1025,14 @@ samples_sc <- map2(samples_sc, seurat_tumor_metadata,
 
 Run ssGSEA scoring.
 
-```{r run_ssgsea_hg, cache = F}
+```{r run_ssgsea_hg, eval = FALSE}
 
-# #Run ssGSEA
-# purrr::imap(samples_sc,
-#           ~ run_gsea(seurat = .x,
-#                        alias = .y,
-#                        genelist = sigs_list_ssgsea_hg,
-#                        genelist_name = "tumor_sigs_comparator_consensus"))
+# Run ssGSEA
+purrr::imap(samples_sc,
+          ~ run_gsea(seurat = .x,
+                       alias = .y,
+                       genelist = sigs_list_ssgsea_hg,
+                       genelist_name = "tumor_sigs_comparator_consensus"))
 
 ```
 
@@ -1142,7 +1141,7 @@ gene_split_hg <- gene_split_hg %>%
 
 ```
 
-Produce normalized counts matrix
+Produce normalized counts matrix:
 
 ```{r norm-counts-hg, fig.height=13, fig.width=12}
 
@@ -1163,7 +1162,7 @@ sample_split <- hg_nbfoxr2 %>%
 ```
 
 Scale each row (gene) by Z score, group together NB-FOXR2 from in-house and 
-Korshunov datasets, and annotate genes of interest on the right side. 
+Korshunov datasets, and annotate genes of interest on the right side. We rasterize the heatmap for Adobe Illustrator.
 
 ```{r heatmap-hg-scaled-row-zscore-groupnbfoxr2-annogenes, fig.height=13, fig.width=12}
 
@@ -1254,45 +1253,12 @@ purrr::imap(scores,
 
 ```
 
-In the publication, we separate the rows for neurons (main figures) and glia 
-(supplementary figures) as follows:
-
-```{r plot_ssgsea_enrichment_celltype_neurons, fig.height = 4, fig.width=30, cache = F}
-
-purrr::imap(scores,
-            ~ plot_dist_score_ridge(scores = .x %>% filter(broad_label %in% c("Neuron")),
-                              alias = .y,
-                              comparators = names(sigs_list_ssgsea),
-                              palette = palette_groups,
-                              y_split_var = "broad_label",
-                              color_var = "Signature",
-                              scale = 0.6))  %>%
-    plot_grid(plotlist = .,
-              align = "h",
-              ncol = 3)
-
-```
-
-```{r plot_ssgsea_enrichment_celltype_glia, fig.height = 4, fig.width=30, cache = F}
-
-purrr::imap(scores,
-            ~ plot_dist_score_ridge(scores = .x %>% filter(broad_label %in% c("Glia")),
-                              alias = .y,
-                              comparators = names(sigs_list_ssgsea),
-                              palette = palette_groups,
-                              y_split_var = "broad_label",
-                              color_var = "Signature",
-                              scale = 0.6))  %>%
-    plot_grid(plotlist = .,
-              align = "h",
-              ncol = 3)
-
-```
-
+In the publication, we separate the plot rows for neurons (main figures) and glia 
+(supplementary figures) in Adobe Illustrator.
 
 ### Joint UMAP of ssGSEA score in malignant neurons
 
-Load joint object.
+Load joint object of all mouse model samples and metadata produced in previous R markdown `07.1`.
 
 ```{r load-joint}
 
@@ -1314,7 +1280,7 @@ seurat_joint@meta.data <- seurat_mouse_metadata_joint %>%
 
 ```
 
-Add scores to joint object metadata and save.
+Add ssGSEA scores per cell to joint object metadata and save the metadata dataframe.
 
 ```{r add-scores-meta-joint}
 
@@ -1339,7 +1305,7 @@ save(joint_scores, file = glue("{out}/joint_mouse_ssGSEA_scores_meta.Rda"))
 
 ```
 
-Save joint object with no Non-consensus cells or doublets for plotting
+Remove No consensus cells and doublets from the joint object for plotting purpose.
 
 ```{r save-joint-obj-plot}
 
@@ -1347,7 +1313,7 @@ seurat_joint <- subset(seurat_joint, subset = broad_label != "No consensus" & !i
 
 ```
 
-Set same legend for each UMAP - check range of values for each signature score
+In order to set same score color legend for all of the UMAPs, we check the range of values for each signature score.
 
 ```{r set-range-legend}
 
@@ -1358,14 +1324,14 @@ range(seurat_joint$ssGSEA_DIPG)
 
 ```
 
-* Max value: 7802 from max(ssGSEA_DIPG)
-* Min value: -2236 from min(ssGSEA_MB_WNT)
+* Max value: max(ssGSEA_DIPG)
+* Min value: min(ssGSEA_MB_WNT)
 
-Setting legend to be between these two values for ssGSEA UMAP plots.
+We set legend to be between these two values for all ssGSEA UMAP plots.
 
 For the publication figure, we will superimpose the neurons colored by 
 ssGSEA score over a grey UMAP showing all cells. We will produce each UMAP
-separately in ths R markdown and superimpose in Adobe Illustrator.
+separately in this R markdown and superimpose in Adobe Illustrator.
 
 Produce grey UMAP with malignant and normal cells together:
 
@@ -1391,7 +1357,7 @@ y_range <- layer_scales(p_grey)$y$range$range
 
 ```
 
-Save joint object with malignant neurons only:
+Save joint object subset to malignant neurons only:
 
 ```{r save-joint-obj-plot-mal-neur-only}
 
@@ -1399,13 +1365,11 @@ seurat_joint_mal_neurons <- subset(seurat_joint, subset = broad_label == "Neuron
 
 ```
 
-Plot ssGSEA score in malignant neurons only:
+Plot ssGSEA score in malignant neurons only, ordering points by score. Rasterize these plots for Adobe Illustrator.
 
 ```{r umap-ssgsea-mouse-joint-mal-neur-only, fig.height=6, fig.width=7}
 
 ## FOXR2 ssgsea
-
-print("Order points by score")
 p1 <- FeaturePlot(seurat_joint_mal_neurons, pt.size = 1, features = "ssGSEA_NBFOXR2", order = T) +
   scale_color_gradientn(colors = c("darkblue", "white", "red"),
                          limits = c(min(seurat_joint$ssGSEA_MB_WNT), max(seurat_joint$ssGSEA_DIPG))) + 
@@ -1415,9 +1379,16 @@ p1 <- FeaturePlot(seurat_joint_mal_neurons, pt.size = 1, features = "ssGSEA_NBFO
 ggrastr::rasterise(p1, dpi = 2000)
 
 ## MB-WNT ssgsea
+p2 <- FeaturePlot(seurat_joint_mal_neurons, pt.size = 1, features = c("ssGSEA_MB_WNT"), order = T) +
+  scale_color_gradientn(colors = c("darkblue", "white", "red"),
+                         limits = c(min(seurat_joint$ssGSEA_MB_WNT), max(seurat_joint$ssGSEA_DIPG))) + 
+    xlim(x_range) + ylim(y_range) +
+    square_theme + large_text
 
-print("Order points by score")
-p3 <- FeaturePlot(seurat_joint_mal_neurons, pt.size = 1, features = c("ssGSEA_MB_WNT"), order = T) +
+ggrastr::rasterise(p2, dpi = 2000)
+
+## ETMR ssgsea
+p3 <- FeaturePlot(seurat_joint_mal_neurons, pt.size = 1, features = c("ssGSEA_ETMR"), order = T) +
   scale_color_gradientn(colors = c("darkblue", "white", "red"),
                          limits = c(min(seurat_joint$ssGSEA_MB_WNT), max(seurat_joint$ssGSEA_DIPG))) + 
     xlim(x_range) + ylim(y_range) +
@@ -1425,27 +1396,14 @@ p3 <- FeaturePlot(seurat_joint_mal_neurons, pt.size = 1, features = c("ssGSEA_MB
 
 ggrastr::rasterise(p3, dpi = 2000)
 
-## ETMR ssgsea
-
-print("Order points by score")
-p5 <- FeaturePlot(seurat_joint_mal_neurons, pt.size = 1, features = c("ssGSEA_ETMR"), order = T) +
-  scale_color_gradientn(colors = c("darkblue", "white", "red"),
-                         limits = c(min(seurat_joint$ssGSEA_MB_WNT), max(seurat_joint$ssGSEA_DIPG))) + 
-    xlim(x_range) + ylim(y_range) +
-    square_theme + large_text
-
-ggrastr::rasterise(p5, dpi = 2000)
-
 ## DIPG ssgsea
-
-print("Order points by score")
-p7 <- FeaturePlot(seurat_joint_mal_neurons, pt.size = 1, features = c("ssGSEA_DIPG"), order = T) +
+p4 <- FeaturePlot(seurat_joint_mal_neurons, pt.size = 1, features = c("ssGSEA_DIPG"), order = T) +
   scale_color_gradientn(colors = c("darkblue", "white", "red"),
                          limits = c(min(seurat_joint$ssGSEA_MB_WNT), max(seurat_joint$ssGSEA_DIPG))) + 
     xlim(x_range) + ylim(y_range) +
     square_theme + large_text
 
-ggrastr::rasterise(p7, dpi = 2000)
+ggrastr::rasterise(p4, dpi = 2000)
 
 ```
 
