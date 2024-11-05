@@ -6,11 +6,11 @@
 - Link to repository: https://github.com/fungenomics/NB-FOXR2
 - This repository is archived on [Zenodo](https://www.doi.org/10.5281/zenodo.13755695)
 - This repository contains primarily code, see the **Data availability** section for links to data
-- See the  **Code to reproduce analyses** section for links to code of each figure and table
+- See the  [**Code to reproduce analyses**](https://github.com/fungenomics/NB-FOXR2#code-to-reproduce-analyses) section for links to code of each figure and table
 
-# Contents of this repository
+## Contents of this repository
 
-## Codebase overview
+### Codebase overview
 
 - This repository is meant to enhance the Materials & Methods section by providing code for the custom
 analyses in the manuscript and the exact R dependencies, in order to improve reproducibility for the main results.
@@ -21,7 +21,7 @@ This repository mainly contains custom/downstream code.
 Copies of these scripts are provided in the `code/scripts/per_sample_script_examples` (the execution of these scripts is performed in the `data/singlecell`, `data/RNAseq`, etc folders, not included here).
 - A second level of downstream analysis involves custom analyses, aggregating samples and data types, use to derive the main results included in the paper. These are provided in .Rmd files in `code`, with the associated .md and rendered HTML files. 
 
-## Codebase structure
+### Codebase structure
 
 * `renv.lock` --> lockfile containing all package versions for R analysis
 * `code` --> code for R analysis, contains the .Rmd files that run the high-level analyses and produce figures included in the paper
@@ -30,7 +30,7 @@ Copies of these scripts are provided in the `code/scripts/per_sample_script_exam
 * `include` --> contains templates, palettes, etc, for this repository
 * `rr_helpers.R` --> contains helper functions for working with this GitHub repository template ([`rr`](https://github.com/sjessa/rr))
 
-## Analysis documents
+### Analysis documents
 
 Rendered HTML files for each analysis can be viewed here:
 
@@ -116,21 +116,25 @@ Supplementary table number | Title | R markdown
 
 ### Data from this study
 
-- Raw and processed data for murine samples have been deposited to GEO at [GSE270666](https://www.ncbi.xyz/geo/query/acc.cgi?acc=GSE270666).
-- Raw data for human tumors have been deposited to EGA at [EGAS00001007247](https://ega-archive.org/dacs/EGAC00001003262).
-- For human samples, please see the associated [Zenodo record]( https://doi.org/10.5281/zenodo.13750919) for processed data including counts 
-matrices, cell annotations, and bigWig files. 
+- Raw and processed data for murine samples have been deposited to GEO at
+[GSE270666](https://www.ncbi.xyz/geo/query/acc.cgi?acc=GSE270666).
+- Raw data for human tumors have been deposited to EGA at
+[EGAS00001007247](https://ega-archive.org/dacs/EGAC00001003262).
+- For human samples, please see the associated [Zenodo record](https://doi.org/10.5281/zenodo.13750919)
+for processed data including counts matrices, cell annotations, and bigWig files. 
 
 
 ### External data
 
 - [Gartlgruber 2021](https://www.nature.com/articles/s43018-020-00145-w) dataset 
 of extracranial neuroblastoma (bulk RNA-seq) analyzed in this study were obtained
-as count matrices from a public web app provided by the authors (https://nbseb087.dkfz.de/project_NB_SE_viz/). 
+as count matrices from a [public Shiny web app](https://nbseb087.dkfz.de/project_NB_SE_viz/)
+provided by the authors. 
 
-- TARGET dataset of extracranial neuroblastoma (bulk RNA-seq) analyzed in this 
-study were obtained as count matrices from the public Genomic Data Commons (GDC) 
-cancer portal (https://portal.gdc.cancer.gov/) as described in R markdown `08`.
+- [TARGET](https://gdc.cancer.gov/content/target-nbl-publication-summary)
+dataset of extracranial neuroblastoma (bulk RNA-seq) analyzed in this 
+study were obtained as count matrices from the public [Genomic Data Commons (GDC) 
+cancer portal](https://portal.gdc.cancer.gov/) as described in R markdown `08`.
 
 
 ## GitHub / version control
@@ -143,7 +147,7 @@ The following are tracked / available on GitHub:
 The following are not tracked / available on GitHub:
 
 * Figures in `png`/`pdf` format
-* Raw data and analysis output / processed data files (see **Data availability** section above)
+* Raw data and analysis output / processed data files (see [**Data availability**](https://github.com/fungenomics/NB-FOXR2#data-availability) section above)
 * The actual packages in the R library 
 
 ## Citation
