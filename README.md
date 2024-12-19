@@ -120,7 +120,7 @@ Supplementary table number | Title | R markdown
 [GSE270666](https://www.ncbi.xyz/geo/query/acc.cgi?acc=GSE270666).
 - Raw data for human tumors have been deposited to EGA at
 [EGAS00001007247](https://ega-archive.org/dacs/EGAC00001003262).
-- For human samples, please see the associated [Zenodo record](https://doi.org/10.5281/zenodo.13750919)
+- For human and mouse samples, please see the associated [Zenodo record](https://doi.org/10.5281/zenodo.13750919)
 for processed data including counts matrices, cell annotations, and bigWig files. 
 
 
